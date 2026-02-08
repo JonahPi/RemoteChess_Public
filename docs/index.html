@@ -1,0 +1,1015 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0, maximum-scale=1.0, user-scalable=no">
+    <meta name="apple-mobile-web-app-capable" content="yes">
+    <meta name="apple-mobile-web-app-status-bar-style" content="black-translucent">
+    <meta name="theme-color" content="#1a1a1a">
+    <title>Remote Chess</title>
+    <link rel="manifest" href="manifest.json">
+    <link rel="preconnect" href="https://fonts.googleapis.com">
+    <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
+    <link href="https://fonts.googleapis.com/css2?family=Noto+Sans+Symbols+2&display=swap" rel="stylesheet">
+    <style>
+        * {
+            margin: 0;
+            padding: 0;
+            box-sizing: border-box;
+            -webkit-tap-highlight-color: transparent;
+        }
+
+        body {
+            font-family: -apple-system, BlinkMacSystemFont, 'Segoe UI', sans-serif;
+            background: #1a1a1a;
+            color: #fff;
+            overflow: hidden;
+            touch-action: none;
+        }
+
+        #app {
+            display: flex;
+            flex-direction: column;
+            height: 100vh;
+            padding: 10px;
+        }
+
+        #status {
+            text-align: center;
+            padding: 15px;
+            background: #2a2a2a;
+            border-radius: 10px;
+            margin-bottom: 10px;
+        }
+
+        #status-indicator {
+            display: inline-block;
+            width: 10px;
+            height: 10px;
+            border-radius: 50%;
+            background: #ff4444;
+            margin-right: 8px;
+            animation: pulse 2s infinite;
+        }
+
+        #status-indicator.connected {
+            background: #44ff44;
+        }
+
+        @keyframes pulse {
+            0%, 100% { opacity: 1; }
+            50% { opacity: 0.5; }
+        }
+
+        #board-container {
+            flex: 1;
+            display: flex;
+            align-items: center;
+            justify-content: center;
+            padding: 10px;
+        }
+
+        #board {
+            width: 100%;
+            max-width: 400px;
+            aspect-ratio: 1;
+            display: grid;
+            grid-template-columns: repeat(8, 1fr);
+            gap: 2px;
+            background: #444;
+            border: 3px solid #666;
+            border-radius: 8px;
+            padding: 2px;
+        }
+
+        .square {
+            position: relative;
+            aspect-ratio: 1;
+            display: flex;
+            align-items: center;
+            justify-content: center;
+            font-size: 32px;
+            cursor: pointer;
+            user-select: none;
+            transition: background-color 0.2s;
+        }
+
+        .square.light {
+            background: #f0d9b5;
+        }
+
+        .square.dark {
+            background: #b58863;
+        }
+
+        .square.selected {
+            background: #7fc97f !important;
+        }
+
+        .led-indicator {
+            position: absolute;
+            top: 3px;
+            right: 3px;
+            width: 8px;
+            height: 8px;
+            border-radius: 50%;
+            background: transparent;
+            transition: background-color 0.2s;
+            z-index: 10;
+        }
+
+        .led-indicator.red {
+            background: #ff0000;
+            box-shadow: 0 0 8px #ff0000;
+        }
+
+        .led-indicator.green {
+            background: #00ff00;
+            box-shadow: 0 0 8px #00ff00;
+        }
+
+        .led-indicator.blink {
+            animation: blink 0.2s infinite;
+        }
+
+        @keyframes blink {
+            0%, 100% { opacity: 1; }
+            50% { opacity: 0; }
+        }
+
+        .piece {
+            width: 80%;
+            height: 80%;
+            display: flex;
+            align-items: center;
+            justify-content: center;
+            font-weight: bold;
+            font-size: 36px;
+            font-family: 'Noto Sans Symbols 2', 'Chess Merida', sans-serif;
+        }
+
+        .piece.black {
+            color: #000;
+        }
+
+        .piece.white {
+            color: #fff;
+            text-shadow: -1px -1px 0 #000, 1px -1px 0 #000, -1px 1px 0 #000, 1px 1px 0 #000;
+        }
+
+        #controls {
+            padding: 15px;
+            background: #2a2a2a;
+            border-radius: 10px;
+            margin-top: 10px;
+            display: flex;
+            gap: 10px;
+        }
+
+        #controls button {
+            flex: 1;
+            margin: 0;
+            padding: 12px;
+            border: none;
+            border-radius: 8px;
+            font-size: 16px;
+            color: #fff;
+            cursor: pointer;
+        }
+
+        #flip-btn {
+            background: #6600cc;
+        }
+
+        #flip-btn:active {
+            background: #5200a3;
+        }
+
+        #undo-btn {
+            background: #cc6600;
+        }
+
+        #undo-btn:active:not(:disabled) {
+            background: #a35200;
+        }
+
+        #reset-btn {
+            background: #0066cc;
+        }
+
+        #reset-btn:active {
+            background: #0052a3;
+        }
+
+        #reset-btn.sync-mode {
+            background: #cc6600;
+        }
+
+        #reset-btn.sync-mode:active {
+            background: #a35200;
+        }
+
+        button:disabled {
+            background: #555 !important;
+            cursor: not-allowed;
+        }
+    </style>
+</head>
+<body>
+    <div id="app">
+        <div id="status">
+            <span id="status-indicator"></span>
+            <span id="status-text">Disconnected</span>
+        </div>
+
+        <div id="board-container">
+            <div id="board"></div>
+        </div>
+
+        <div id="controls">
+            <button id="flip-btn">Wechsel</button>
+            <button id="undo-btn" disabled>Zurück</button>
+            <button id="reset-btn">Neu starten</button>
+        </div>
+    </div>
+
+    <script src="https://cdnjs.cloudflare.com/ajax/libs/paho-mqtt/1.0.1/mqttws31.min.js"></script>
+    <script>
+        // MQTT Configuration for Adafruit IO
+        const MQTT_CONFIG = {
+            broker: 'io.adafruit.com',
+            port: 443,
+            useSSL: true,
+            topic: 'ToniTwn/feeds/chess',
+            username: 'ToniTwn'
+        };
+
+        // Get or prompt for Adafruit IO Key (stored in localStorage)
+        function getApiKey() {
+            let key = localStorage.getItem('adafruit_io_key');
+            if (!key) {
+                key = prompt('Enter your Adafruit IO Key (API key):');
+                if (key) {
+                    localStorage.setItem('adafruit_io_key', key);
+                }
+            }
+            return key;
+        }
+
+        // Clear stored API key (call from console if needed: clearApiKey())
+        function clearApiKey() {
+            localStorage.removeItem('adafruit_io_key');
+            alert('API key cleared. Reload to enter a new key.');
+        }
+
+        // Chess pieces as text labels
+        const PIECE_LABELS = {
+            '♔': { label: '♔', color: 'white' },
+            '♕': { label: '♕', color: 'white' },
+            '♖': { label: '♖', color: 'white' },
+            '♗': { label: '♗', color: 'white' },
+            '♘': { label: '♘', color: 'white' },
+            '♙': { label: '♙', color: 'white' },
+            '♚': { label: '♚', color: 'black' },
+            '♛': { label: '♛', color: 'black' },
+            '♜': { label: '♜', color: 'black' },
+            '♝': { label: '♝', color: 'black' },
+            '♞': { label: '♞', color: 'black' },
+            '♟': { label: '♟', color: 'black' }
+        };
+
+        // Initial board setup
+        const INITIAL_BOARD = [
+            ['♜','♞','♝','♛','♚','♝','♞','♜'],
+            ['♟','♟','♟','♟','♟','♟','♟','♟'],
+            ['','','','','','','',''],
+            ['','','','','','','',''],
+            ['','','','','','','',''],
+            ['','','','','','','',''],
+            ['♙','♙','♙','♙','♙','♙','♙','♙'],
+            ['♖','♘','♗','♕','♔','♗','♘','♖']
+        ];
+
+        // Game state
+        let board = JSON.parse(JSON.stringify(INITIAL_BOARD));
+        let selectedSquare = null;
+        let mqttClient = null;
+        let isConnected = false;
+        let ledStates = {};
+        let sentMessages = new Set();
+        let externalFirstLiftCoord = null;  // c1: First lifted piece
+        let externalSecondLiftCoord = null; // c2: Second lifted piece (capture scenario)
+        let fadingTimer = null;
+        let lastMove = null; // { fromRow, fromCol, toRow, toCol, movedPiece, capturedPiece }
+        let boardFlipped = false;
+        let promotedQueens = new Set(); // Track queens that were promoted from pawns
+        let awaitingSync = false; // Lock moves until board confirms sync
+        let syncMode = false; // True when showing Sync button instead of Neu starten
+
+        // FEN piece to Unicode mapping
+        const FEN_TO_PIECE = {
+            'K': '♔', 'Q': '♕', 'R': '♖', 'B': '♗', 'N': '♘', 'P': '♙',
+            'k': '♚', 'q': '♛', 'r': '♜', 'b': '♝', 'n': '♞', 'p': '♟'
+        };
+
+        // Check if any piece is in middle rows (3-6, array indices 2-5)
+        function hasPiecesInMiddle() {
+            for (let row = 2; row <= 5; row++) {
+                for (let col = 0; col < 8; col++) {
+                    if (board[row][col] !== '') {
+                        return true;
+                    }
+                }
+            }
+            return false;
+        }
+
+        // Update the third button between "Neu starten" and "Sync"
+        function updateThirdButton() {
+            const btn = document.getElementById('reset-btn');
+            const piecesInMiddle = hasPiecesInMiddle();
+
+            if (piecesInMiddle && !syncMode) {
+                syncMode = true;
+                btn.textContent = 'Sync';
+                btn.classList.add('sync-mode');
+            } else if (!piecesInMiddle && syncMode) {
+                syncMode = false;
+                btn.textContent = 'Neu starten';
+                btn.classList.remove('sync-mode');
+            }
+        }
+
+        // Parse FEN notation and update board
+        function parseFEN(fen) {
+            const rows = fen.split('/');
+            if (rows.length !== 8) {
+                addLog('Invalid FEN: wrong number of rows', 'error');
+                return false;
+            }
+
+            const newBoard = [];
+            for (let i = 0; i < 8; i++) {
+                const row = [];
+                const fenRow = rows[i];
+                for (let j = 0; j < fenRow.length; j++) {
+                    const char = fenRow[j];
+                    if (char >= '1' && char <= '8') {
+                        // Empty squares
+                        const emptyCount = parseInt(char);
+                        for (let k = 0; k < emptyCount; k++) {
+                            row.push('');
+                        }
+                    } else if (FEN_TO_PIECE[char]) {
+                        row.push(FEN_TO_PIECE[char]);
+                    } else {
+                        addLog(`Invalid FEN character: ${char}`, 'error');
+                        return false;
+                    }
+                }
+                if (row.length !== 8) {
+                    addLog(`Invalid FEN: row ${i+1} has ${row.length} squares`, 'error');
+                    return false;
+                }
+                newBoard.push(row);
+            }
+
+            // Update board state
+            board = newBoard;
+            updateBoardUI();
+            updateThirdButton();
+            addLog('Board synced from ESP', 'success');
+            return true;
+        }
+
+        // Request sync from ESP
+        function requestSync() {
+            addLog('requestSync called, connected=' + isConnected, 'info');
+            if (!isConnected) {
+                addLog('Not connected to MQTT', 'error');
+                return;
+            }
+            publishMove('sync');
+            addLog('Sync requested from ESP', 'info');
+        }
+
+        // Initialize board UI
+        function initBoard() {
+            const boardEl = document.getElementById('board');
+            boardEl.innerHTML = '';
+
+            for (let displayRow = 0; displayRow < 8; displayRow++) {
+                for (let displayCol = 0; displayCol < 8; displayCol++) {
+                    // When flipped, reverse both row and column order
+                    const row = boardFlipped ? (7 - displayRow) : displayRow;
+                    const col = boardFlipped ? (7 - displayCol) : displayCol;
+
+                    const square = document.createElement('div');
+                    const coord = String.fromCharCode(65 + col) + (8 - row);
+
+                    // Use display position for coloring (keeps board pattern consistent)
+                    square.className = 'square ' + ((displayRow + displayCol) % 2 === 0 ? 'light' : 'dark');
+                    square.dataset.row = row;
+                    square.dataset.col = col;
+                    square.dataset.coord = coord;
+
+                    // LED indicator
+                    const led = document.createElement('div');
+                    led.className = 'led-indicator';
+                    led.dataset.coord = coord;
+                    square.appendChild(led);
+
+                    // Piece
+                    const piece = document.createElement('div');
+                    piece.className = 'piece';
+                    const pieceSymbol = board[row][col];
+                    if (pieceSymbol && PIECE_LABELS[pieceSymbol]) {
+                        piece.textContent = PIECE_LABELS[pieceSymbol].label;
+                        piece.classList.add(PIECE_LABELS[pieceSymbol].color);
+                    }
+                    square.appendChild(piece);
+
+                    square.addEventListener('click', () => handleSquareClick(row, col, coord));
+                    boardEl.appendChild(square);
+                }
+            }
+
+            // Restore LED states after re-rendering
+            Object.keys(ledStates).forEach(coord => {
+                const state = ledStates[coord];
+                if (state.color) {
+                    const led = document.querySelector(`.led-indicator[data-coord="${coord}"]`);
+                    if (led) {
+                        led.classList.add(state.color);
+                        if (state.blink) {
+                            led.classList.add('blink');
+                        }
+                    }
+                }
+            });
+        }
+
+        // Handle square click
+        function handleSquareClick(row, col, coord) {
+            if (!isConnected) {
+                addLog('Not connected to MQTT', 'error');
+                return;
+            }
+
+            if (awaitingSync) {
+                addLog('Waiting for board to sync move', 'error');
+                return;
+            }
+
+            if (selectedSquare === null) {
+                // Select piece
+                if (board[row][col] !== '') {
+                    selectedSquare = { row, col, coord };
+                    document.querySelector(`[data-coord="${coord}"]`).classList.add('selected');
+                    publishMove(coord + '-L');
+                }
+            } else {
+                // Move piece
+                const fromCoord = selectedSquare.coord;
+                const toCoord = coord;
+
+                // Save last move for undo (before updating board)
+                lastMove = {
+                    fromRow: selectedSquare.row,
+                    fromCol: selectedSquare.col,
+                    toRow: row,
+                    toCol: col,
+                    movedPiece: board[selectedSquare.row][selectedSquare.col],
+                    capturedPiece: board[row][col]
+                };
+                document.getElementById('undo-btn').disabled = false;
+
+                // Check if same location (pawn-to-queen conversion only on rows 1 and 8)
+                let pieceTransformed = false;
+                if (selectedSquare.row === row && selectedSquare.col === col) {
+                    const piece = board[row][col];
+                    const coordKey = `${row},${col}`;
+                    // White pawn to white queen (only on row 8, which is array index 0)
+                    if (piece === '♙' && row === 0) {
+                        board[row][col] = '♕';
+                        promotedQueens.add(coordKey);
+                        pieceTransformed = true;
+                        addLog('White pawn promoted to queen', 'info');
+                    } else if (piece === '♕' && row === 0 && promotedQueens.has(coordKey)) {
+                        board[row][col] = '♙';
+                        promotedQueens.delete(coordKey);
+                        pieceTransformed = true;
+                        addLog('White queen demoted to pawn', 'info');
+                    }
+                    // Black pawn to black queen (only on row 1, which is array index 7)
+                    else if (piece === '♟' && row === 7) {
+                        board[row][col] = '♛';
+                        promotedQueens.add(coordKey);
+                        pieceTransformed = true;
+                        addLog('Black pawn promoted to queen', 'info');
+                    } else if (piece === '♛' && row === 7 && promotedQueens.has(coordKey)) {
+                        board[row][col] = '♟';
+                        promotedQueens.delete(coordKey);
+                        pieceTransformed = true;
+                        addLog('Black queen demoted to pawn', 'info');
+                    }
+                } else {
+                    // Normal move
+                    board[row][col] = board[selectedSquare.row][selectedSquare.col];
+                    board[selectedSquare.row][selectedSquare.col] = '';
+                }
+
+                // Clear selection
+                document.querySelector(`[data-coord="${fromCoord}"]`).classList.remove('selected');
+                selectedSquare = null;
+
+                // Publish move: R for return to same position, P for place at new position or after transformation
+                if (fromCoord === toCoord && !pieceTransformed) {
+                    publishMove(toCoord + '-R');  // Return to original position
+                } else {
+                    publishMove(toCoord + '-P');  // Normal place or transformation
+                    awaitingSync = true;  // Lock until board confirms sync
+                }
+
+                // Update UI
+                updateBoardUI();
+            }
+        }
+
+        // Update board UI
+        function updateBoardUI() {
+            for (let row = 0; row < 8; row++) {
+                for (let col = 0; col < 8; col++) {
+                    const coord = String.fromCharCode(65 + col) + (8 - row);
+                    const square = document.querySelector(`[data-coord="${coord}"]`);
+                    const piece = square.querySelector('.piece');
+                    const pieceSymbol = board[row][col];
+
+                    piece.className = 'piece';
+                    if (pieceSymbol && PIECE_LABELS[pieceSymbol]) {
+                        piece.textContent = PIECE_LABELS[pieceSymbol].label;
+                        piece.classList.add(PIECE_LABELS[pieceSymbol].color);
+                    } else {
+                        piece.textContent = '';
+                    }
+                }
+            }
+            // Update button state after board changes
+            updateThirdButton();
+        }
+
+        // Update LED indicator
+        function updateLED(coord, color, blink = false) {
+            const led = document.querySelector(`.led-indicator[data-coord="${coord}"]`);
+            if (led) {
+                led.className = 'led-indicator';
+                if (color) {
+                    led.classList.add(color);
+                    if (blink) {
+                        led.classList.add('blink');
+                    }
+                }
+                ledStates[coord] = { color, blink };
+            }
+        }
+
+        // Clear all LEDs
+        function clearAllLEDs() {
+            document.querySelectorAll('.led-indicator').forEach(led => {
+                led.className = 'led-indicator';
+            });
+            ledStates = {};
+        }
+
+        // MQTT Functions
+        function connectMQTT() {
+            const { broker, port, topic, useSSL, username } = MQTT_CONFIG;
+            const password = getApiKey();
+
+            if (!password) {
+                addLog('No API key provided. Cannot connect.', 'error');
+                updateConnectionStatus(false);
+                return;
+            }
+
+            const clientId = 'chess_pwa_' + Math.random().toString(16).substr(2, 8);
+            const protocol = useSSL ? 'wss' : 'ws';
+
+            addLog(`Connecting to ${protocol}://${broker}:${port}/mqtt`, 'info');
+
+            try {
+                mqttClient = new Paho.MQTT.Client(broker, port, '/mqtt', clientId);
+
+                mqttClient.onConnectionLost = (responseObject) => {
+                    if (responseObject.errorCode !== 0) {
+                        addLog('Connection lost: ' + responseObject.errorMessage, 'error');
+                        updateConnectionStatus(false);
+                        // Auto-reconnect after connection loss
+                        setTimeout(connectMQTT, 3000);
+                    }
+                };
+
+                mqttClient.onMessageArrived = (message) => {
+                    handleMQTTMessage(message.payloadString);
+                };
+
+                const connectOptions = {
+                    onSuccess: () => {
+                        addLog('Connected to Adafruit IO!', 'success');
+                        updateConnectionStatus(true);
+                        mqttClient.subscribe(topic);
+                        addLog('Subscribed to ' + topic, 'success');
+
+                        // Show connection indication: D4, E4 green and D5, E5 red for 1 second
+                        updateLED('D4', 'green', false);
+                        updateLED('E4', 'green', false);
+                        updateLED('D5', 'red', false);
+                        updateLED('E5', 'red', false);
+                        setTimeout(() => {
+                            updateLED('D4', null, false);
+                            updateLED('E4', null, false);
+                            updateLED('D5', null, false);
+                            updateLED('E5', null, false);
+                        }, 1000);
+                    },
+                    onFailure: (error) => {
+                        addLog('Connection failed: ' + error.errorMessage, 'error');
+                        updateConnectionStatus(false);
+                        // Clear stored key if auth failed (likely wrong key)
+                        if (error.errorMessage && error.errorMessage.includes('not authorized')) {
+                            localStorage.removeItem('adafruit_io_key');
+                            addLog('Invalid API key cleared. Reload to try again.', 'error');
+                        } else {
+                            // Auto-retry after 5 seconds for other errors
+                            setTimeout(connectMQTT, 5000);
+                        }
+                    },
+                    useSSL: useSSL,
+                    timeout: 10,
+                    keepAliveInterval: 30,
+                    userName: username,
+                    password: password
+                };
+
+                mqttClient.connect(connectOptions);
+            } catch (error) {
+                addLog('Error: ' + error.message, 'error');
+                updateConnectionStatus(false);
+            }
+        }
+
+        function publishMove(message) {
+            if (mqttClient && isConnected) {
+                try {
+                    sentMessages.add(message);
+                    const mqttMessage = new Paho.MQTT.Message(message);
+                    mqttMessage.destinationName = MQTT_CONFIG.topic;
+                    mqttClient.send(mqttMessage);
+                    addLog('Sent: ' + message, 'sent');
+                } catch (error) {
+                    addLog('Publish error: ' + error.message, 'error');
+                }
+            }
+        }
+
+        function handleMQTTMessage(message) {
+            addLog('Received: ' + message, 'received');
+
+            // Handle FEN sync response
+            if (message.startsWith('fen:')) {
+                const fen = message.substring(4);
+                addLog('Parsing FEN: ' + fen, 'info');
+                const success = parseFEN(fen);
+                addLog('FEN parse result: ' + success, 'info');
+                return;
+            }
+
+            // Ignore sync echo (our own message)
+            if (message === 'sync') {
+                addLog('Ignoring sync echo', 'info');
+                return;
+            }
+
+            // Handle restart message
+            if (message === 'restart') {
+                const isLocalMessage = sentMessages.has(message);
+                if (isLocalMessage) {
+                    sentMessages.delete(message);
+                    return; // Don't process our own restart
+                }
+                // Reset board from external source
+                board = JSON.parse(JSON.stringify(INITIAL_BOARD));
+                selectedSquare = null;
+                externalFirstLiftCoord = null;
+                externalSecondLiftCoord = null;
+                lastMove = null;
+                promotedQueens.clear();
+                awaitingSync = false;
+                document.getElementById('undo-btn').disabled = true;
+                initBoard();
+                clearAllLEDs();
+                updateThirdButton();
+                addLog('External restart received', 'info');
+                return;
+            }
+
+            // Handle undo message
+            if (message === 'undo') {
+                const isLocalMessage = sentMessages.has(message);
+                if (isLocalMessage) {
+                    sentMessages.delete(message);
+                    return; // Don't process our own undo
+                }
+                // Undo last move from external source
+                if (lastMove) {
+                    board[lastMove.fromRow][lastMove.fromCol] = lastMove.movedPiece;
+                    board[lastMove.toRow][lastMove.toCol] = lastMove.capturedPiece;
+                    clearAllLEDs();
+                    updateBoardUI();
+                    lastMove = null;
+                    addLog('External undo received', 'info');
+                }
+                return;
+            }
+
+            if (message.length < 4) return;
+
+            const coord = message.substring(0, message.length - 2);
+            const action = message.charAt(message.length - 1);
+
+            // Check if this message was sent by us
+            const isLocalMessage = sentMessages.has(message);
+            if (isLocalMessage) {
+                sentMessages.delete(message);
+            }
+
+            if (action === 'L') {
+                // Lift - State 1→2 (first lift) or State 2→4 (second lift for capture)
+                if (!isLocalMessage) {
+                    if (externalFirstLiftCoord === null) {
+                        // First lift (State 1 → State 2)
+                        clearAllLEDs();
+                        externalFirstLiftCoord = coord;
+                    } else {
+                        // Second lift (State 2 → State 4, capture scenario)
+                        externalSecondLiftCoord = coord;
+                    }
+                } else {
+                    // Local message - just clear LEDs for first lift
+                    if (externalFirstLiftCoord === null) {
+                        clearAllLEDs();
+                    }
+                }
+                updateLED(coord, 'red', false);
+
+                // Clear fading timer on new lift
+                if (fadingTimer) {
+                    clearTimeout(fadingTimer);
+                    fadingTimer = null;
+                }
+            } else if (action === 'P') {
+                // Place - State 2 → State 3 (normal move)
+                updateLED(coord, 'green', false);
+
+                // If external move, update board
+                if (!isLocalMessage && externalFirstLiftCoord) {
+                    const fromCol = externalFirstLiftCoord.charCodeAt(0) - 65;
+                    const fromRow = 8 - parseInt(externalFirstLiftCoord.charAt(1));
+                    const toCol = coord.charCodeAt(0) - 65;
+                    const toRow = 8 - parseInt(coord.charAt(1));
+
+                    // Save for potential undo
+                    lastMove = {
+                        fromRow: fromRow,
+                        fromCol: fromCol,
+                        toRow: toRow,
+                        toCol: toCol,
+                        movedPiece: board[fromRow][fromCol],
+                        capturedPiece: board[toRow][toCol]
+                    };
+
+                    // Check if same location (pawn-to-queen conversion only on rows 1 and 8)
+                    if (externalFirstLiftCoord === coord) {
+                        const piece = board[fromRow][fromCol];
+                        const coordKey = `${fromRow},${fromCol}`;
+                        // White pawn to white queen (only on row 8, which is array index 0)
+                        if (piece === '♙' && fromRow === 0) {
+                            board[fromRow][fromCol] = '♕';
+                            promotedQueens.add(coordKey);
+                            addLog('External: White pawn promoted to queen', 'info');
+                        } else if (piece === '♕' && fromRow === 0 && promotedQueens.has(coordKey)) {
+                            board[fromRow][fromCol] = '♙';
+                            promotedQueens.delete(coordKey);
+                            addLog('External: White queen demoted to pawn', 'info');
+                        }
+                        // Black pawn to black queen (only on row 1, which is array index 7)
+                        else if (piece === '♟' && fromRow === 7) {
+                            board[fromRow][fromCol] = '♛';
+                            promotedQueens.add(coordKey);
+                            addLog('External: Black pawn promoted to queen', 'info');
+                        } else if (piece === '♛' && fromRow === 7 && promotedQueens.has(coordKey)) {
+                            board[fromRow][fromCol] = '♟';
+                            promotedQueens.delete(coordKey);
+                            addLog('External: Black queen demoted to pawn', 'info');
+                        }
+                    } else {
+                        // Normal move
+                        board[toRow][toCol] = board[fromRow][fromCol];
+                        board[fromRow][fromCol] = '';
+                    }
+                    updateBoardUI();
+                    externalFirstLiftCoord = null;
+                    externalSecondLiftCoord = null;
+                }
+
+                // Start 20s fading timer
+                if (fadingTimer) {
+                    clearTimeout(fadingTimer);
+                }
+                fadingTimer = setTimeout(() => {
+                    clearAllLEDs();
+                    fadingTimer = null;
+                    awaitingSync = false;
+                }, 20000);
+            } else if (action === 'R') {
+                // Return - figure returned to original position (State 2 → restart)
+                updateLED(coord, null, false);  // Turn off LED
+
+                // Clear external lift since figure returned
+                if (!isLocalMessage) {
+                    externalFirstLiftCoord = null;
+                    externalSecondLiftCoord = null;
+                }
+
+                // Clear fading timer
+                if (fadingTimer) {
+                    clearTimeout(fadingTimer);
+                    fadingTimer = null;
+                }
+            } else if (action === 'X') {
+                // Capture - State 4 → restart
+                // X at coord means piece is placed there, the other lifted piece is captured
+                updateLED(coord, 'red', true);
+
+                if (!isLocalMessage && externalFirstLiftCoord && externalSecondLiftCoord) {
+                    // Determine attacker origin and victim origin
+                    // If X is at c1 (first lift), attacker came from c2 (second lift)
+                    // If X is at c2 (second lift), attacker came from c1 (first lift)
+                    let attackerOrigin, victimOrigin;
+                    if (coord === externalFirstLiftCoord) {
+                        attackerOrigin = externalSecondLiftCoord;
+                        victimOrigin = externalFirstLiftCoord;
+                    } else {
+                        attackerOrigin = externalFirstLiftCoord;
+                        victimOrigin = externalSecondLiftCoord;
+                    }
+
+                    const fromCol = attackerOrigin.charCodeAt(0) - 65;
+                    const fromRow = 8 - parseInt(attackerOrigin.charAt(1));
+                    const toCol = coord.charCodeAt(0) - 65;
+                    const toRow = 8 - parseInt(coord.charAt(1));
+
+                    // Save for potential undo
+                    lastMove = {
+                        fromRow: fromRow,
+                        fromCol: fromCol,
+                        toRow: toRow,
+                        toCol: toCol,
+                        movedPiece: board[fromRow][fromCol],
+                        capturedPiece: board[toRow][toCol]
+                    };
+
+                    // Move attacker to capture position
+                    board[toRow][toCol] = board[fromRow][fromCol];
+                    board[fromRow][fromCol] = '';
+                    updateBoardUI();
+
+                    addLog(`Capture: ${attackerOrigin} → ${coord}`, 'info');
+
+                    externalFirstLiftCoord = null;
+                    externalSecondLiftCoord = null;
+                }
+
+                // Start 20s fading timer
+                if (fadingTimer) {
+                    clearTimeout(fadingTimer);
+                }
+                fadingTimer = setTimeout(() => {
+                    clearAllLEDs();
+                    fadingTimer = null;
+                    awaitingSync = false;
+                }, 20000);
+            } else if (action === 'O') {
+                // Sync indication - board confirmed piece sync at coordinate
+                updateLED(coord, null, false);
+                delete ledStates[coord];
+
+                // Check if all colored LEDs are cleared (sync complete)
+                const hasActiveLEDs = Object.values(ledStates).some(s => s.color);
+                if (!hasActiveLEDs) {
+                    awaitingSync = false;
+                    if (fadingTimer) {
+                        clearTimeout(fadingTimer);
+                        fadingTimer = null;
+                    }
+                }
+            }
+        }
+
+        function updateConnectionStatus(connected) {
+            isConnected = connected;
+            const indicator = document.getElementById('status-indicator');
+            const text = document.getElementById('status-text');
+
+            if (connected) {
+                indicator.classList.add('connected');
+                text.textContent = 'Connected';
+            } else {
+                indicator.classList.remove('connected');
+                text.textContent = 'Disconnected';
+            }
+        }
+
+        function addLog(message, type = 'info') {
+            console.log(`[${type}] ${message}`);
+        }
+
+        function resetBoard() {
+            addLog('resetBoard called, syncMode=' + syncMode, 'info');
+            // Check if we're in sync mode (pieces in middle rows)
+            if (syncMode) {
+                // Request sync from ESP instead of resetting
+                requestSync();
+                return;
+            }
+
+            board = JSON.parse(JSON.stringify(INITIAL_BOARD));
+            selectedSquare = null;
+            externalFirstLiftCoord = null;
+            externalSecondLiftCoord = null;
+            lastMove = null;
+            promotedQueens.clear();
+            awaitingSync = false;
+            document.getElementById('undo-btn').disabled = true;
+            initBoard();
+            clearAllLEDs();
+            updateThirdButton();
+            addLog('Board reset', 'info');
+            // Send restart message to MQTT
+            publishMove('restart');
+            // Try to reconnect if not connected
+            if (!isConnected) {
+                connectMQTT();
+            }
+        }
+
+        function undoMove() {
+            if (!lastMove) return;
+
+            // Restore pieces to original positions
+            board[lastMove.fromRow][lastMove.fromCol] = lastMove.movedPiece;
+            board[lastMove.toRow][lastMove.toCol] = lastMove.capturedPiece;
+
+            // Clear LEDs and unlock
+            clearAllLEDs();
+            awaitingSync = false;
+
+            // Update UI
+            updateBoardUI();
+
+            // Disable undo button (only works for one move)
+            lastMove = null;
+            document.getElementById('undo-btn').disabled = true;
+
+            // Send undo message to MQTT
+            publishMove('undo');
+
+            addLog('Move undone', 'info');
+        }
+
+        function flipBoard() {
+            boardFlipped = !boardFlipped;
+            // Clear selection when flipping
+            if (selectedSquare) {
+                document.querySelector(`[data-coord="${selectedSquare.coord}"]`)?.classList.remove('selected');
+                selectedSquare = null;
+            }
+            initBoard();
+            addLog('Board flipped: ' + (boardFlipped ? 'black on bottom' : 'white on bottom'), 'info');
+        }
+
+        // Event listeners
+        document.getElementById('flip-btn').addEventListener('click', flipBoard);
+        document.getElementById('undo-btn').addEventListener('click', undoMove);
+        document.getElementById('reset-btn').addEventListener('click', resetBoard);
+
+        // Initialize
+        initBoard();
+        updateThirdButton();
+        addLog('Chess PWA ready', 'info');
+
+        // Auto-connect on load
+        connectMQTT();
+    </script>
+</body>
+</html>
