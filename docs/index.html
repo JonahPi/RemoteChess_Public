@@ -849,7 +849,7 @@
             } else if (action === 'X') {
                 // Capture - State 4 → restart
                 // X at coord means piece is placed there, the other lifted piece is captured
-                updateLED(coord, 'red', true);
+                updateLED(coord, 'green', false);
 
                 if (!isLocalMessage && externalFirstLiftCoord && externalSecondLiftCoord) {
                     // Determine attacker origin and victim origin
@@ -908,6 +908,8 @@
                 const hasActiveLEDs = Object.values(ledStates).some(s => s.color);
                 if (!hasActiveLEDs) {
                     awaitingSync = false;
+                    externalFirstLiftCoord = null;
+                    externalSecondLiftCoord = null;
                     if (fadingTimer) {
                         clearTimeout(fadingTimer);
                         fadingTimer = null;
