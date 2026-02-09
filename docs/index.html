@@ -312,6 +312,12 @@
             'k': '♚', 'q': '♛', 'r': '♜', 'b': '♝', 'n': '♞', 'p': '♟'
         };
 
+        // Unicode piece to FEN character mapping (reverse of FEN_TO_PIECE)
+        const PIECE_TO_FEN = {
+            '\u2654': 'K', '\u2655': 'Q', '\u2656': 'R', '\u2657': 'B', '\u2658': 'N', '\u2659': 'P',
+            '\u265A': 'k', '\u265B': 'q', '\u265C': 'r', '\u265D': 'b', '\u265E': 'n', '\u265F': 'p'
+        };
+
         // Check if any piece is in middle rows (3-6, array indices 2-5)
         function hasPiecesInMiddle() {
             for (let row = 2; row <= 5; row++) {
@@ -380,6 +386,30 @@
             updateThirdButton();
             addLog('Board synced from ESP', 'success');
             return true;
+        }
+
+        // Convert board state to FEN notation (piece placement only)
+        function boardToFEN() {
+            const fenRows = [];
+            for (let row = 0; row < 8; row++) {
+                let fenRow = '';
+                let emptyCount = 0;
+                for (let col = 0; col < 8; col++) {
+                    const piece = board[row][col];
+                    if (piece === '') {
+                        emptyCount++;
+                    } else {
+                        if (emptyCount > 0) {
+                            fenRow += emptyCount;
+                            emptyCount = 0;
+                        }
+                        fenRow += PIECE_TO_FEN[piece] || '?';
+                    }
+                }
+                if (emptyCount > 0) fenRow += emptyCount;
+                fenRows.push(fenRow);
+            }
+            return fenRows.join('/');
         }
 
         // Request sync from ESP
@@ -527,7 +557,7 @@
                 if (fromCoord === toCoord && !pieceTransformed) {
                     publishMove(toCoord + '-R');  // Return to original position
                 } else {
-                    publishMove(toCoord + '-P');  // Normal place or transformation
+                    publishMove(toCoord + '-P|' + boardToFEN());  // Normal place or transformation
                     awaitingSync = true;  // Lock until board confirms sync
                 }
 
@@ -734,8 +764,17 @@
 
             if (message.length < 4) return;
 
-            const coord = message.substring(0, message.length - 2);
-            const action = message.charAt(message.length - 1);
+            // Split off FEN payload if present
+            let movePart = message;
+            let receivedFEN = null;
+            const pipeIndex = message.indexOf('|');
+            if (pipeIndex !== -1) {
+                movePart = message.substring(0, pipeIndex);
+                receivedFEN = message.substring(pipeIndex + 1);
+            }
+
+            const coord = movePart.substring(0, movePart.length - 2);
+            const action = movePart.charAt(movePart.length - 1);
 
             // Check if this message was sent by us
             const isLocalMessage = sentMessages.has(message);
@@ -820,6 +859,15 @@
                     updateBoardUI();
                     externalFirstLiftCoord = null;
                     externalSecondLiftCoord = null;
+
+                    // FEN validation
+                    if (receivedFEN) {
+                        const localFEN = boardToFEN();
+                        if (localFEN !== receivedFEN) {
+                            addLog('FEN mismatch after move, force-syncing', 'error');
+                            parseFEN(receivedFEN);
+                        }
+                    }
                 }
 
                 // Start 20s fading timer
@@ -888,6 +936,15 @@
 
                     externalFirstLiftCoord = null;
                     externalSecondLiftCoord = null;
+
+                    // FEN validation
+                    if (receivedFEN) {
+                        const localFEN = boardToFEN();
+                        if (localFEN !== receivedFEN) {
+                            addLog('FEN mismatch after capture, force-syncing', 'error');
+                            parseFEN(receivedFEN);
+                        }
+                    }
                 }
 
                 // Start 20s fading timer
