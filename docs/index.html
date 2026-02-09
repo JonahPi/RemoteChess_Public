@@ -132,6 +132,18 @@
             animation: blink 0.2s infinite;
         }
 
+        .piece.unknown {
+            color: #ff4444;
+            font-size: 28px;
+            font-weight: bold;
+            animation: pulse-unknown 1s infinite;
+        }
+
+        @keyframes pulse-unknown {
+            0%, 100% { opacity: 1; }
+            50% { opacity: 0.4; }
+        }
+
         @keyframes blink {
             0%, 100% { opacity: 1; }
             50% { opacity: 0; }
@@ -207,6 +219,14 @@
 
         #reset-btn.sync-mode:active {
             background: #a35200;
+        }
+
+        #reset-btn.confirm-mode {
+            background: #00aa44;
+        }
+
+        #reset-btn.confirm-mode:active:not(:disabled) {
+            background: #008833;
         }
 
         button:disabled {
@@ -305,6 +325,8 @@
         let promotedQueens = new Set(); // Track queens that were promoted from pawns
         let awaitingSync = false; // Lock moves until board confirms sync
         let syncMode = false; // True when showing Sync button instead of Neu starten
+        let syncResolutionMode = false;   // True when user is resolving "?" squares
+        let unknownSquares = new Set();   // Set of "row,col" strings that show "?"
 
         // FEN piece to Unicode mapping
         const FEN_TO_PIECE = {
@@ -318,6 +340,8 @@
             '\u265A': 'k', '\u265B': 'q', '\u265C': 'r', '\u265D': 'b', '\u265E': 'n', '\u265F': 'p'
         };
 
+        const PIECE_CYCLE = ['?','♙','♘','♗','♖','♕','♔','♟','♞','♝','♜','♛','♚'];
+
         // Check if any piece is in middle rows (3-6, array indices 2-5)
         function hasPiecesInMiddle() {
             for (let row = 2; row <= 5; row++) {
@@ -330,19 +354,29 @@
             return false;
         }
 
-        // Update the third button between "Neu starten" and "Sync"
+        // Update the third button between "Neu starten", "Sync", and "Bestätigen"
         function updateThirdButton() {
             const btn = document.getElementById('reset-btn');
             const piecesInMiddle = hasPiecesInMiddle();
 
-            if (piecesInMiddle && !syncMode) {
+            if (syncResolutionMode) {
+                btn.textContent = 'Bestätigen';
+                btn.classList.remove('sync-mode');
+                btn.classList.add('confirm-mode');
+                btn.disabled = unknownSquares.size > 0;
+                syncMode = false;
+            } else if (piecesInMiddle && !syncMode) {
                 syncMode = true;
                 btn.textContent = 'Sync';
                 btn.classList.add('sync-mode');
+                btn.classList.remove('confirm-mode');
+                btn.disabled = false;
             } else if (!piecesInMiddle && syncMode) {
                 syncMode = false;
                 btn.textContent = 'Neu starten';
                 btn.classList.remove('sync-mode');
+                btn.classList.remove('confirm-mode');
+                btn.disabled = false;
             }
         }
 
@@ -423,6 +457,89 @@
             addLog('Sync requested from ESP', 'info');
         }
 
+        function handleEnhancedSync(fen, occ) {
+            const rows = fen.split('/');
+            if (rows.length !== 8 || occ.length !== 64) {
+                addLog('Invalid enhanced sync data', 'error');
+                return;
+            }
+
+            // Parse FEN into temporary board
+            const fenBoard = [];
+            for (let i = 0; i < 8; i++) {
+                const row = [];
+                const fenRow = rows[i];
+                for (let j = 0; j < fenRow.length; j++) {
+                    const char = fenRow[j];
+                    if (char >= '1' && char <= '8') {
+                        for (let k = 0; k < parseInt(char); k++) row.push('');
+                    } else if (FEN_TO_PIECE[char]) {
+                        row.push(FEN_TO_PIECE[char]);
+                    } else {
+                        addLog('Invalid FEN character: ' + char, 'error');
+                        return;
+                    }
+                }
+                if (row.length !== 8) {
+                    addLog('Invalid FEN row length', 'error');
+                    return;
+                }
+                fenBoard.push(row);
+            }
+
+            // Compare FEN vs occupancy
+            unknownSquares = new Set();
+            let hasConflicts = false;
+
+            for (let row = 0; row < 8; row++) {
+                for (let col = 0; col < 8; col++) {
+                    const occIndex = row * 8 + col;
+                    const sensorOccupied = occ[occIndex] === '1';
+                    const fenPiece = fenBoard[row][col];
+
+                    if (fenPiece !== '' && sensorOccupied) {
+                        board[row][col] = fenPiece;           // Agree: trust FEN
+                    } else if (fenPiece === '' && !sensorOccupied) {
+                        board[row][col] = '';                  // Agree: empty
+                    } else if (fenPiece === '' && sensorOccupied) {
+                        board[row][col] = '?';                 // Conflict: unknown piece
+                        unknownSquares.add(row + ',' + col);
+                        hasConflicts = true;
+                    } else {
+                        board[row][col] = '';                  // FEN has piece but removed physically
+                    }
+                }
+            }
+
+            updateBoardUI();
+
+            if (hasConflicts) {
+                syncResolutionMode = true;
+                updateThirdButton();
+                addLog(unknownSquares.size + ' unknown piece(s) - tap to identify', 'info');
+            } else {
+                addLog('Board synced from ESP (no conflicts)', 'success');
+                updateThirdButton();
+            }
+        }
+
+        function cyclePiece(row, col) {
+            const currentPiece = board[row][col];
+            const currentIndex = PIECE_CYCLE.indexOf(currentPiece);
+            const nextIndex = (currentIndex + 1) % PIECE_CYCLE.length;
+            board[row][col] = PIECE_CYCLE[nextIndex];
+
+            const key = row + ',' + col;
+            if (PIECE_CYCLE[nextIndex] === '?') {
+                unknownSquares.add(key);
+            } else {
+                unknownSquares.delete(key);
+            }
+
+            updateBoardUI();
+            updateThirdButton();
+        }
+
         // Initialize board UI
         function initBoard() {
             const boardEl = document.getElementById('board');
@@ -453,7 +570,10 @@
                     const piece = document.createElement('div');
                     piece.className = 'piece';
                     const pieceSymbol = board[row][col];
-                    if (pieceSymbol && PIECE_LABELS[pieceSymbol]) {
+                    if (pieceSymbol === '?') {
+                        piece.textContent = '?';
+                        piece.classList.add('unknown');
+                    } else if (pieceSymbol && PIECE_LABELS[pieceSymbol]) {
                         piece.textContent = PIECE_LABELS[pieceSymbol].label;
                         piece.classList.add(PIECE_LABELS[pieceSymbol].color);
                     }
@@ -481,6 +601,15 @@
 
         // Handle square click
         function handleSquareClick(row, col, coord) {
+            // Handle sync resolution taps
+            if (syncResolutionMode) {
+                const key = row + ',' + col;
+                if (unknownSquares.has(key) || board[row][col] === '?') {
+                    cyclePiece(row, col);
+                }
+                return;
+            }
+
             if (!isConnected) {
                 addLog('Not connected to MQTT', 'error');
                 return;
@@ -576,7 +705,10 @@
                     const pieceSymbol = board[row][col];
 
                     piece.className = 'piece';
-                    if (pieceSymbol && PIECE_LABELS[pieceSymbol]) {
+                    if (pieceSymbol === '?') {
+                        piece.textContent = '?';
+                        piece.classList.add('unknown');
+                    } else if (pieceSymbol && PIECE_LABELS[pieceSymbol]) {
                         piece.textContent = PIECE_LABELS[pieceSymbol].label;
                         piece.classList.add(PIECE_LABELS[pieceSymbol].color);
                     } else {
@@ -707,10 +839,24 @@
 
             // Handle FEN sync response
             if (message.startsWith('fen:')) {
-                const fen = message.substring(4);
-                addLog('Parsing FEN: ' + fen, 'info');
-                const success = parseFEN(fen);
-                addLog('FEN parse result: ' + success, 'info');
+                const payload = message.substring(4);
+                const pipeIndex = payload.indexOf('|');
+
+                if (pipeIndex !== -1) {
+                    const fen = payload.substring(0, pipeIndex);
+                    const occ = payload.substring(pipeIndex + 1);
+                    addLog('Enhanced sync: FEN + occupancy', 'info');
+                    handleEnhancedSync(fen, occ);
+                } else {
+                    addLog('Parsing FEN: ' + payload, 'info');
+                    parseFEN(payload);
+                }
+                return;
+            }
+
+            // Handle fenfix echo
+            if (message.startsWith('fenfix:')) {
+                addLog('Ignoring fenfix echo', 'info');
                 return;
             }
 
@@ -995,6 +1141,11 @@
 
         function resetBoard() {
             addLog('resetBoard called, syncMode=' + syncMode, 'info');
+            // Check if we're in sync resolution mode
+            if (syncResolutionMode) {
+                confirmSyncResolution();
+                return;
+            }
             // Check if we're in sync mode (pieces in middle rows)
             if (syncMode) {
                 // Request sync from ESP instead of resetting
@@ -1020,6 +1171,26 @@
             if (!isConnected) {
                 connectMQTT();
             }
+        }
+
+        function confirmSyncResolution() {
+            if (unknownSquares.size > 0) {
+                addLog('Cannot confirm: ' + unknownSquares.size + ' unknown piece(s) remaining', 'error');
+                return;
+            }
+
+            const correctedFEN = boardToFEN();
+            publishMove('fenfix:' + correctedFEN);
+            addLog('Sent corrected FEN to ESP: ' + correctedFEN, 'success');
+
+            syncResolutionMode = false;
+            unknownSquares = new Set();
+
+            const btn = document.getElementById('reset-btn');
+            btn.classList.remove('confirm-mode');
+            btn.disabled = false;
+            updateThirdButton();
+            updateBoardUI();
         }
 
         function undoMove() {
