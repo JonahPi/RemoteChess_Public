@@ -326,7 +326,8 @@
         let awaitingSync = false; // Lock moves until board confirms sync
         let syncMode = false; // True when showing Sync button instead of Neu starten
         let syncResolutionMode = false;   // True when user is resolving "?" squares
-        let unknownSquares = new Set();   // Set of "row,col" strings that show "?"
+        let unknownSquares = new Set();   // Set of "row,col" strings that still show "?"
+        let resolutionSquares = new Set(); // Set of "row,col" strings that are part of resolution (persists until confirmed)
 
         // FEN piece to Unicode mapping
         const FEN_TO_PIECE = {
@@ -489,6 +490,7 @@
 
             // Compare FEN vs occupancy
             unknownSquares = new Set();
+            resolutionSquares = new Set();
             let hasConflicts = false;
 
             for (let row = 0; row < 8; row++) {
@@ -503,7 +505,9 @@
                         board[row][col] = '';                  // Agree: empty
                     } else if (fenPiece === '' && sensorOccupied) {
                         board[row][col] = '?';                 // Conflict: unknown piece
-                        unknownSquares.add(row + ',' + col);
+                        const key = row + ',' + col;
+                        unknownSquares.add(key);
+                        resolutionSquares.add(key);
                         hasConflicts = true;
                     } else {
                         board[row][col] = '';                  // FEN has piece but removed physically
@@ -604,7 +608,7 @@
             // Handle sync resolution taps
             if (syncResolutionMode) {
                 const key = row + ',' + col;
-                if (unknownSquares.has(key) || board[row][col] === '?') {
+                if (resolutionSquares.has(key)) {
                     cyclePiece(row, col);
                 }
                 return;
@@ -621,9 +625,9 @@
             }
 
             if (selectedSquare === null) {
-                // Select piece
+                // Select piece - save piece identity now to protect against board changes between clicks
                 if (board[row][col] !== '') {
-                    selectedSquare = { row, col, coord };
+                    selectedSquare = { row, col, coord, piece: board[row][col] };
                     document.querySelector(`[data-coord="${coord}"]`).classList.add('selected');
                     publishMove(coord + '-L');
                 }
@@ -633,12 +637,13 @@
                 const toCoord = coord;
 
                 // Save last move for undo (before updating board)
+                const movingPiece = selectedSquare.piece;
                 lastMove = {
                     fromRow: selectedSquare.row,
                     fromCol: selectedSquare.col,
                     toRow: row,
                     toCol: col,
-                    movedPiece: board[selectedSquare.row][selectedSquare.col],
+                    movedPiece: movingPiece,
                     capturedPiece: board[row][col]
                 };
                 document.getElementById('undo-btn').disabled = false;
@@ -646,7 +651,7 @@
                 // Check if same location (pawn-to-queen conversion only on rows 1 and 8)
                 let pieceTransformed = false;
                 if (selectedSquare.row === row && selectedSquare.col === col) {
-                    const piece = board[row][col];
+                    const piece = movingPiece;
                     const coordKey = `${row},${col}`;
                     // White pawn to white queen (only on row 8, which is array index 0)
                     if (piece === '♙' && row === 0) {
@@ -673,8 +678,8 @@
                         addLog('Black queen demoted to pawn', 'info');
                     }
                 } else {
-                    // Normal move
-                    board[row][col] = board[selectedSquare.row][selectedSquare.col];
+                    // Normal move - use saved piece identity from selection time
+                    board[row][col] = movingPiece;
                     board[selectedSquare.row][selectedSquare.col] = '';
                 }
 
@@ -1185,6 +1190,7 @@
 
             syncResolutionMode = false;
             unknownSquares = new Set();
+            resolutionSquares = new Set();
 
             const btn = document.getElementById('reset-btn');
             btn.classList.remove('confirm-mode');
