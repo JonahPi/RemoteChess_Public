@@ -1010,14 +1010,16 @@
                     updateBoardUI();
                     externalFirstLiftCoord = null;
                     externalSecondLiftCoord = null;
+                }
 
-                    // FEN validation
-                    if (receivedFEN) {
-                        const localFEN = boardToFEN();
-                        if (localFEN !== receivedFEN) {
-                            addLog('FEN mismatch after move, force-syncing', 'error');
-                            parseFEN(receivedFEN);
-                        }
+                // FEN validation — always check on external P, even if lift was missed
+                if (!isLocalMessage && receivedFEN) {
+                    const localFEN = boardToFEN();
+                    if (localFEN !== receivedFEN) {
+                        addLog('FEN mismatch after move, force-syncing', 'error');
+                        parseFEN(receivedFEN);
+                        externalFirstLiftCoord = null;
+                        externalSecondLiftCoord = null;
                     }
                 }
 
@@ -1087,14 +1089,16 @@
 
                     externalFirstLiftCoord = null;
                     externalSecondLiftCoord = null;
+                }
 
-                    // FEN validation
-                    if (receivedFEN) {
-                        const localFEN = boardToFEN();
-                        if (localFEN !== receivedFEN) {
-                            addLog('FEN mismatch after capture, force-syncing', 'error');
-                            parseFEN(receivedFEN);
-                        }
+                // FEN validation — always check on external X, even if lift coords were missed
+                if (!isLocalMessage && receivedFEN) {
+                    const localFEN = boardToFEN();
+                    if (localFEN !== receivedFEN) {
+                        addLog('FEN mismatch after capture, force-syncing', 'error');
+                        parseFEN(receivedFEN);
+                        externalFirstLiftCoord = null;
+                        externalSecondLiftCoord = null;
                     }
                 }
 
@@ -1116,8 +1120,12 @@
                 const hasActiveLEDs = Object.values(ledStates).some(s => s.color);
                 if (!hasActiveLEDs) {
                     awaitingSync = false;
-                    externalFirstLiftCoord = null;
-                    externalSecondLiftCoord = null;
+                    // Only clear lift coords if no new external move is in progress
+                    // (a new L could have arrived while we were still syncing)
+                    if (!externalFirstLiftCoord || coord === externalFirstLiftCoord) {
+                        externalFirstLiftCoord = null;
+                        externalSecondLiftCoord = null;
+                    }
                     if (fadingTimer) {
                         clearTimeout(fadingTimer);
                         fadingTimer = null;
