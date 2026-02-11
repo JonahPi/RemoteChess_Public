@@ -324,6 +324,7 @@
         let boardFlipped = false;
         let promotedQueens = new Set(); // Track queens that were promoted from pawns
         let awaitingSync = false; // Lock moves until board confirms sync
+        let ignoreNextMessage = false; // Skip retained MQTT message on connect
         let syncMode = false; // True when showing Sync button instead of Neu starten
         let syncResolutionMode = false;   // True when user is resolving "?" squares
         let unknownSquares = new Set();   // Set of "row,col" strings that still show "?"
@@ -415,8 +416,9 @@
                 newBoard.push(row);
             }
 
-            // Update board state
+            // Update board state — FEN is authoritative, clear stale promotion tracking
             board = newBoard;
+            promotedQueens.clear();
             updateBoardUI();
             updateThirdButton();
             addLog('Board synced from ESP', 'success');
@@ -639,6 +641,7 @@
                 // Save last move for undo (before updating board)
                 const movingPiece = selectedSquare.piece;
                 lastMove = {
+                    previousBoard: JSON.parse(JSON.stringify(board)),
                     fromRow: selectedSquare.row,
                     fromCol: selectedSquare.col,
                     toRow: row,
@@ -784,6 +787,7 @@
                     onSuccess: () => {
                         addLog('Connected to Adafruit IO!', 'success');
                         updateConnectionStatus(true);
+                        ignoreNextMessage = true;
                         mqttClient.subscribe(topic);
                         addLog('Subscribed to ' + topic, 'success');
 
@@ -797,6 +801,7 @@
                             updateLED('E4', null, false);
                             updateLED('D5', null, false);
                             updateLED('E5', null, false);
+                            requestSync();
                         }, 1000);
                     },
                     onFailure: (error) => {
@@ -840,6 +845,13 @@
         }
 
         function handleMQTTMessage(message) {
+            // Skip stale retained message delivered immediately after subscribe
+            if (ignoreNextMessage) {
+                ignoreNextMessage = false;
+                addLog('Skipped retained message: ' + message, 'info');
+                return;
+            }
+
             addLog('Received: ' + message, 'received');
 
             // Handle FEN sync response
@@ -903,11 +915,12 @@
                 }
                 // Undo last move from external source
                 if (lastMove) {
-                    board[lastMove.fromRow][lastMove.fromCol] = lastMove.movedPiece;
-                    board[lastMove.toRow][lastMove.toCol] = lastMove.capturedPiece;
+                    board = lastMove.previousBoard;
                     clearAllLEDs();
+                    awaitingSync = false;
                     updateBoardUI();
                     lastMove = null;
+                    document.getElementById('undo-btn').disabled = true;
                     addLog('External undo received', 'info');
                 }
                 return;
@@ -961,66 +974,52 @@
                 // Place - State 2 → State 3 (normal move)
                 updateLED(coord, 'green', false);
 
-                // If external move, update board
-                if (!isLocalMessage && externalFirstLiftCoord) {
-                    const fromCol = externalFirstLiftCoord.charCodeAt(0) - 65;
-                    const fromRow = 8 - parseInt(externalFirstLiftCoord.charAt(1));
-                    const toCol = coord.charCodeAt(0) - 65;
-                    const toRow = 8 - parseInt(coord.charAt(1));
+                // If external move, update board using FEN-first approach
+                if (!isLocalMessage) {
+                    const previousBoard = JSON.parse(JSON.stringify(board));
 
-                    // Save for potential undo
-                    lastMove = {
-                        fromRow: fromRow,
-                        fromCol: fromCol,
-                        toRow: toRow,
-                        toCol: toCol,
-                        movedPiece: board[fromRow][fromCol],
-                        capturedPiece: board[toRow][toCol]
-                    };
+                    if (receivedFEN) {
+                        // FEN is authoritative — apply directly
+                        parseFEN(receivedFEN);
+                        addLog('External move applied via FEN', 'info');
+                    } else if (externalFirstLiftCoord) {
+                        // Fallback: coordinate-based move (no FEN available)
+                        const fromCol = externalFirstLiftCoord.charCodeAt(0) - 65;
+                        const fromRow = 8 - parseInt(externalFirstLiftCoord.charAt(1));
+                        const toCol = coord.charCodeAt(0) - 65;
+                        const toRow = 8 - parseInt(coord.charAt(1));
 
-                    // Check if same location (pawn-to-queen conversion only on rows 1 and 8)
-                    if (externalFirstLiftCoord === coord) {
-                        const piece = board[fromRow][fromCol];
-                        const coordKey = `${fromRow},${fromCol}`;
-                        // White pawn to white queen (only on row 8, which is array index 0)
-                        if (piece === '♙' && fromRow === 0) {
-                            board[fromRow][fromCol] = '♕';
-                            promotedQueens.add(coordKey);
-                            addLog('External: White pawn promoted to queen', 'info');
-                        } else if (piece === '♕' && fromRow === 0 && promotedQueens.has(coordKey)) {
-                            board[fromRow][fromCol] = '♙';
-                            promotedQueens.delete(coordKey);
-                            addLog('External: White queen demoted to pawn', 'info');
+                        if (externalFirstLiftCoord === coord) {
+                            // Same square: promotion toggle
+                            const piece = board[fromRow][fromCol];
+                            const coordKey = `${fromRow},${fromCol}`;
+                            if (piece === '\u2659' && fromRow === 0) {
+                                board[fromRow][fromCol] = '\u2655';
+                                promotedQueens.add(coordKey);
+                            } else if (piece === '\u2655' && fromRow === 0 && promotedQueens.has(coordKey)) {
+                                board[fromRow][fromCol] = '\u2659';
+                                promotedQueens.delete(coordKey);
+                            } else if (piece === '\u265F' && fromRow === 7) {
+                                board[fromRow][fromCol] = '\u265B';
+                                promotedQueens.add(coordKey);
+                            } else if (piece === '\u265B' && fromRow === 7 && promotedQueens.has(coordKey)) {
+                                board[fromRow][fromCol] = '\u265F';
+                                promotedQueens.delete(coordKey);
+                            }
+                        } else {
+                            board[toRow][toCol] = board[fromRow][fromCol];
+                            board[fromRow][fromCol] = '';
                         }
-                        // Black pawn to black queen (only on row 1, which is array index 7)
-                        else if (piece === '♟' && fromRow === 7) {
-                            board[fromRow][fromCol] = '♛';
-                            promotedQueens.add(coordKey);
-                            addLog('External: Black pawn promoted to queen', 'info');
-                        } else if (piece === '♛' && fromRow === 7 && promotedQueens.has(coordKey)) {
-                            board[fromRow][fromCol] = '♟';
-                            promotedQueens.delete(coordKey);
-                            addLog('External: Black queen demoted to pawn', 'info');
-                        }
-                    } else {
-                        // Normal move
-                        board[toRow][toCol] = board[fromRow][fromCol];
-                        board[fromRow][fromCol] = '';
+                        updateBoardUI();
+                        addLog('External move applied via coordinates (no FEN)', 'info');
                     }
-                    updateBoardUI();
+
+                    // Save for undo with snapshot
+                    lastMove = { previousBoard: previousBoard };
+                    document.getElementById('undo-btn').disabled = false;
+
                     externalFirstLiftCoord = null;
                     externalSecondLiftCoord = null;
-                }
-
-                // FEN validation — always check on external P, even if lift was missed
-                if (!isLocalMessage && receivedFEN) {
-                    const localFEN = boardToFEN();
-                    if (localFEN !== receivedFEN) {
-                        addLog('FEN mismatch after move, force-syncing', 'error');
-                        parseFEN(receivedFEN);
-                        externalFirstLiftCoord = null;
-                        externalSecondLiftCoord = null;
-                    }
                 }
 
                 // Start 20s fading timer
@@ -1052,54 +1051,39 @@
                 // X at coord means piece is placed there, the other lifted piece is captured
                 updateLED(coord, 'green', false);
 
-                if (!isLocalMessage && externalFirstLiftCoord && externalSecondLiftCoord) {
-                    // Determine attacker origin and victim origin
-                    // If X is at c1 (first lift), attacker came from c2 (second lift)
-                    // If X is at c2 (second lift), attacker came from c1 (first lift)
-                    let attackerOrigin, victimOrigin;
-                    if (coord === externalFirstLiftCoord) {
-                        attackerOrigin = externalSecondLiftCoord;
-                        victimOrigin = externalFirstLiftCoord;
-                    } else {
-                        attackerOrigin = externalFirstLiftCoord;
-                        victimOrigin = externalSecondLiftCoord;
+                if (!isLocalMessage) {
+                    const previousBoard = JSON.parse(JSON.stringify(board));
+
+                    if (receivedFEN) {
+                        // FEN is authoritative — apply directly
+                        parseFEN(receivedFEN);
+                        addLog('External capture applied via FEN', 'info');
+                    } else if (externalFirstLiftCoord && externalSecondLiftCoord) {
+                        // Fallback: coordinate-based capture (no FEN available)
+                        let attackerOrigin;
+                        if (coord === externalFirstLiftCoord) {
+                            attackerOrigin = externalSecondLiftCoord;
+                        } else {
+                            attackerOrigin = externalFirstLiftCoord;
+                        }
+
+                        const fromCol = attackerOrigin.charCodeAt(0) - 65;
+                        const fromRow = 8 - parseInt(attackerOrigin.charAt(1));
+                        const toCol = coord.charCodeAt(0) - 65;
+                        const toRow = 8 - parseInt(coord.charAt(1));
+
+                        board[toRow][toCol] = board[fromRow][fromCol];
+                        board[fromRow][fromCol] = '';
+                        updateBoardUI();
+                        addLog(`Capture: ${attackerOrigin} → ${coord} (no FEN)`, 'info');
                     }
 
-                    const fromCol = attackerOrigin.charCodeAt(0) - 65;
-                    const fromRow = 8 - parseInt(attackerOrigin.charAt(1));
-                    const toCol = coord.charCodeAt(0) - 65;
-                    const toRow = 8 - parseInt(coord.charAt(1));
-
-                    // Save for potential undo
-                    lastMove = {
-                        fromRow: fromRow,
-                        fromCol: fromCol,
-                        toRow: toRow,
-                        toCol: toCol,
-                        movedPiece: board[fromRow][fromCol],
-                        capturedPiece: board[toRow][toCol]
-                    };
-
-                    // Move attacker to capture position
-                    board[toRow][toCol] = board[fromRow][fromCol];
-                    board[fromRow][fromCol] = '';
-                    updateBoardUI();
-
-                    addLog(`Capture: ${attackerOrigin} → ${coord}`, 'info');
+                    // Save for undo with snapshot
+                    lastMove = { previousBoard: previousBoard };
+                    document.getElementById('undo-btn').disabled = false;
 
                     externalFirstLiftCoord = null;
                     externalSecondLiftCoord = null;
-                }
-
-                // FEN validation — always check on external X, even if lift coords were missed
-                if (!isLocalMessage && receivedFEN) {
-                    const localFEN = boardToFEN();
-                    if (localFEN !== receivedFEN) {
-                        addLog('FEN mismatch after capture, force-syncing', 'error');
-                        parseFEN(receivedFEN);
-                        externalFirstLiftCoord = null;
-                        externalSecondLiftCoord = null;
-                    }
                 }
 
                 // Start 20s fading timer
@@ -1210,9 +1194,8 @@
         function undoMove() {
             if (!lastMove) return;
 
-            // Restore pieces to original positions
-            board[lastMove.fromRow][lastMove.fromCol] = lastMove.movedPiece;
-            board[lastMove.toRow][lastMove.toCol] = lastMove.capturedPiece;
+            // Restore board from snapshot
+            board = lastMove.previousBoard;
 
             // Clear LEDs and unlock
             clearAllLEDs();
