@@ -317,8 +317,7 @@
         let isConnected = false;
         let ledStates = {};
         let sentMessages = new Set();
-        let externalFirstLiftCoord = null;  // c1: First lifted piece
-        let externalSecondLiftCoord = null; // c2: Second lifted piece (capture scenario)
+        let externalLiftCoord = null;  // Tracks opponent's in-progress lift (for LED clearing only)
         let fadingTimer = null;
         let lastMove = null; // { fromRow, fromCol, toRow, toCol, movedPiece, capturedPiece }
         let boardFlipped = false;
@@ -854,6 +853,8 @@
 
             addLog('Received: ' + message, 'received');
 
+            // --- Dispatch special messages ---
+
             // Handle FEN sync response
             if (message.startsWith('fen:')) {
                 const payload = message.substring(4);
@@ -893,8 +894,7 @@
                 // Reset board from external source
                 board = JSON.parse(JSON.stringify(INITIAL_BOARD));
                 selectedSquare = null;
-                externalFirstLiftCoord = null;
-                externalSecondLiftCoord = null;
+                externalLiftCoord = null;
                 lastMove = null;
                 promotedQueens.clear();
                 awaitingSync = false;
@@ -926,6 +926,8 @@
                 return;
             }
 
+            // --- Parse move message ---
+
             if (message.length < 4) return;
 
             // Split off FEN payload if present
@@ -940,26 +942,24 @@
             const coord = movePart.substring(0, movePart.length - 2);
             const action = movePart.charAt(movePart.length - 1);
 
-            // Check if this message was sent by us
+            // Own-echo check
             const isLocalMessage = sentMessages.has(message);
             if (isLocalMessage) {
                 sentMessages.delete(message);
             }
 
-            if (action === 'L') {
-                // Lift - State 1→2 (first lift) or State 2→4 (second lift for capture)
+            // --- Dispatch on action ---
+
+            switch (action) {
+            case 'L':
+                // Lift — set red LED, track lift coord for external (LED clearing only)
                 if (!isLocalMessage) {
-                    if (externalFirstLiftCoord === null) {
-                        // First lift (State 1 → State 2)
+                    if (externalLiftCoord === null) {
                         clearAllLEDs();
-                        externalFirstLiftCoord = coord;
-                    } else {
-                        // Second lift (State 2 → State 4, capture scenario)
-                        externalSecondLiftCoord = coord;
                     }
+                    externalLiftCoord = coord;
                 } else {
-                    // Local message - just clear LEDs for first lift
-                    if (externalFirstLiftCoord === null) {
+                    if (externalLiftCoord === null) {
                         clearAllLEDs();
                     }
                 }
@@ -970,59 +970,29 @@
                     clearTimeout(fadingTimer);
                     fadingTimer = null;
                 }
-            } else if (action === 'P') {
-                // Place - State 2 → State 3 (normal move)
+                break;
+
+            case 'P':
+            case 'X':
+                // Place or Capture — set green LED, apply FEN if external
                 updateLED(coord, 'green', false);
 
-                // If external move, update board using FEN-first approach
                 if (!isLocalMessage) {
                     const previousBoard = JSON.parse(JSON.stringify(board));
 
                     if (receivedFEN) {
-                        // FEN is authoritative — apply directly
                         parseFEN(receivedFEN);
-                        addLog('External move applied via FEN', 'info');
-                    } else if (externalFirstLiftCoord) {
-                        // Fallback: coordinate-based move (no FEN available)
-                        const fromCol = externalFirstLiftCoord.charCodeAt(0) - 65;
-                        const fromRow = 8 - parseInt(externalFirstLiftCoord.charAt(1));
-                        const toCol = coord.charCodeAt(0) - 65;
-                        const toRow = 8 - parseInt(coord.charAt(1));
-
-                        if (externalFirstLiftCoord === coord) {
-                            // Same square: promotion toggle
-                            const piece = board[fromRow][fromCol];
-                            const coordKey = `${fromRow},${fromCol}`;
-                            if (piece === '\u2659' && fromRow === 0) {
-                                board[fromRow][fromCol] = '\u2655';
-                                promotedQueens.add(coordKey);
-                            } else if (piece === '\u2655' && fromRow === 0 && promotedQueens.has(coordKey)) {
-                                board[fromRow][fromCol] = '\u2659';
-                                promotedQueens.delete(coordKey);
-                            } else if (piece === '\u265F' && fromRow === 7) {
-                                board[fromRow][fromCol] = '\u265B';
-                                promotedQueens.add(coordKey);
-                            } else if (piece === '\u265B' && fromRow === 7 && promotedQueens.has(coordKey)) {
-                                board[fromRow][fromCol] = '\u265F';
-                                promotedQueens.delete(coordKey);
-                            }
-                        } else {
-                            board[toRow][toCol] = board[fromRow][fromCol];
-                            board[fromRow][fromCol] = '';
-                        }
-                        updateBoardUI();
-                        addLog('External move applied via coordinates (no FEN)', 'info');
+                        addLog('External ' + (action === 'X' ? 'capture' : 'move') + ' applied via FEN', 'info');
                     }
 
-                    // Save for undo with snapshot
+                    // Save for undo
                     lastMove = { previousBoard: previousBoard };
                     document.getElementById('undo-btn').disabled = false;
 
-                    externalFirstLiftCoord = null;
-                    externalSecondLiftCoord = null;
+                    externalLiftCoord = null;
                 }
 
-                // Start 20s fading timer
+                // Start 30s fading timer
                 if (fadingTimer) {
                     clearTimeout(fadingTimer);
                 }
@@ -1030,15 +1000,15 @@
                     clearAllLEDs();
                     fadingTimer = null;
                     awaitingSync = false;
-                }, 20000);
-            } else if (action === 'R') {
-                // Return - figure returned to original position (State 2 → restart)
-                updateLED(coord, null, false);  // Turn off LED
+                }, 30000);
+                break;
 
-                // Clear external lift since figure returned
+            case 'R':
+                // Return — piece returned to original position
+                updateLED(coord, null, false);
+
                 if (!isLocalMessage) {
-                    externalFirstLiftCoord = null;
-                    externalSecondLiftCoord = null;
+                    externalLiftCoord = null;
                 }
 
                 // Clear fading timer
@@ -1046,57 +1016,10 @@
                     clearTimeout(fadingTimer);
                     fadingTimer = null;
                 }
-            } else if (action === 'X') {
-                // Capture - State 4 → restart
-                // X at coord means piece is placed there, the other lifted piece is captured
-                updateLED(coord, 'green', false);
+                break;
 
-                if (!isLocalMessage) {
-                    const previousBoard = JSON.parse(JSON.stringify(board));
-
-                    if (receivedFEN) {
-                        // FEN is authoritative — apply directly
-                        parseFEN(receivedFEN);
-                        addLog('External capture applied via FEN', 'info');
-                    } else if (externalFirstLiftCoord && externalSecondLiftCoord) {
-                        // Fallback: coordinate-based capture (no FEN available)
-                        let attackerOrigin;
-                        if (coord === externalFirstLiftCoord) {
-                            attackerOrigin = externalSecondLiftCoord;
-                        } else {
-                            attackerOrigin = externalFirstLiftCoord;
-                        }
-
-                        const fromCol = attackerOrigin.charCodeAt(0) - 65;
-                        const fromRow = 8 - parseInt(attackerOrigin.charAt(1));
-                        const toCol = coord.charCodeAt(0) - 65;
-                        const toRow = 8 - parseInt(coord.charAt(1));
-
-                        board[toRow][toCol] = board[fromRow][fromCol];
-                        board[fromRow][fromCol] = '';
-                        updateBoardUI();
-                        addLog(`Capture: ${attackerOrigin} → ${coord} (no FEN)`, 'info');
-                    }
-
-                    // Save for undo with snapshot
-                    lastMove = { previousBoard: previousBoard };
-                    document.getElementById('undo-btn').disabled = false;
-
-                    externalFirstLiftCoord = null;
-                    externalSecondLiftCoord = null;
-                }
-
-                // Start 20s fading timer
-                if (fadingTimer) {
-                    clearTimeout(fadingTimer);
-                }
-                fadingTimer = setTimeout(() => {
-                    clearAllLEDs();
-                    fadingTimer = null;
-                    awaitingSync = false;
-                }, 20000);
-            } else if (action === 'O') {
-                // Sync indication - board confirmed piece sync at coordinate
+            case 'O':
+                // Sync indication — board confirmed piece at coordinate
                 updateLED(coord, null, false);
                 delete ledStates[coord];
 
@@ -1104,17 +1027,12 @@
                 const hasActiveLEDs = Object.values(ledStates).some(s => s.color);
                 if (!hasActiveLEDs) {
                     awaitingSync = false;
-                    // Only clear lift coords if no new external move is in progress
-                    // (a new L could have arrived while we were still syncing)
-                    if (!externalFirstLiftCoord || coord === externalFirstLiftCoord) {
-                        externalFirstLiftCoord = null;
-                        externalSecondLiftCoord = null;
-                    }
                     if (fadingTimer) {
                         clearTimeout(fadingTimer);
                         fadingTimer = null;
                     }
                 }
+                break;
             }
         }
 
@@ -1152,8 +1070,7 @@
 
             board = JSON.parse(JSON.stringify(INITIAL_BOARD));
             selectedSquare = null;
-            externalFirstLiftCoord = null;
-            externalSecondLiftCoord = null;
+            externalLiftCoord = null;
             lastMove = null;
             promotedQueens.clear();
             awaitingSync = false;
