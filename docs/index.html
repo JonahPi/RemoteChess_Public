@@ -255,13 +255,12 @@
 
     <script src="https://cdnjs.cloudflare.com/ajax/libs/paho-mqtt/1.0.1/mqttws31.min.js"></script>
     <script>
-        // MQTT Configuration for Adafruit IO — two separate streams
+        // MQTT Configuration for Adafruit IO
         const MQTT_CONFIG = {
             broker: 'io.adafruit.com',
             port: 443,
             useSSL: true,
-            topicWhite: 'ToniTwn/feeds/chess-white',
-            topicBlack: 'ToniTwn/feeds/chess-black',
+            topic: 'ToniTwn/feeds/chess',
             username: 'ToniTwn'
         };
 
@@ -317,22 +316,18 @@
         let mqttClient = null;
         let isConnected = false;
         let ledStates = {};
-        let externalLiftCoord = null;
+        let sentMessages = new Set();
+        let externalLiftCoord = null;  // Tracks opponent's in-progress lift (for LED clearing only)
         let fadingTimer = null;
-        let lastMove = null;
+        let lastMove = null; // { fromRow, fromCol, toRow, toCol, movedPiece, capturedPiece }
         let boardFlipped = false;
-        let promotedQueens = new Set();
-        let awaitingSync = false;
-        let syncMode = false;
-        let syncResolutionMode = false;
-        let unknownSquares = new Set();
-        let resolutionSquares = new Set();
-
-        // Two-stream color detection
-        let playerColor = null;       // null, 'white', or 'black'
-        let myPublishTopic = null;    // Set after color determination
-        let ignoreRetainedWhite = false;
-        let ignoreRetainedBlack = false;
+        let promotedQueens = new Set(); // Track queens that were promoted from pawns
+        let awaitingSync = false; // Lock moves until board confirms sync
+        let ignoreNextMessage = false; // Skip retained MQTT message on connect
+        let syncMode = false; // True when showing Sync button instead of Neu starten
+        let syncResolutionMode = false;   // True when user is resolving "?" squares
+        let unknownSquares = new Set();   // Set of "row,col" strings that still show "?"
+        let resolutionSquares = new Set(); // Set of "row,col" strings that are part of resolution (persists until confirmed)
 
         // FEN piece to Unicode mapping
         const FEN_TO_PIECE = {
@@ -347,13 +342,6 @@
         };
 
         const PIECE_CYCLE = ['?','♙','♘','♗','♖','♕','♔','♟','♞','♝','♜','♛','♚'];
-
-        // Check if message is a game move (triggers color assignment)
-        function isGameMove(message) {
-            if (message === 'sync' || message === 'restart' || message === 'undo') return false;
-            if (message.startsWith('fenfix:') || message.startsWith('fen:')) return false;
-            return true;
-        }
 
         // Check if any piece is in middle rows (3-6, array indices 2-5)
         function hasPiecesInMiddle() {
@@ -408,6 +396,7 @@
                 for (let j = 0; j < fenRow.length; j++) {
                     const char = fenRow[j];
                     if (char >= '1' && char <= '8') {
+                        // Empty squares
                         const emptyCount = parseInt(char);
                         for (let k = 0; k < emptyCount; k++) {
                             row.push('');
@@ -426,6 +415,7 @@
                 newBoard.push(row);
             }
 
+            // Update board state — FEN is authoritative, clear stale promotion tracking
             board = newBoard;
             promotedQueens.clear();
             updateBoardUI();
@@ -476,6 +466,7 @@
                 return;
             }
 
+            // Parse FEN into temporary board
             const fenBoard = [];
             for (let i = 0; i < 8; i++) {
                 const row = [];
@@ -498,6 +489,7 @@
                 fenBoard.push(row);
             }
 
+            // Compare FEN vs occupancy
             unknownSquares = new Set();
             resolutionSquares = new Set();
             let hasConflicts = false;
@@ -509,17 +501,17 @@
                     const fenPiece = fenBoard[row][col];
 
                     if (fenPiece !== '' && sensorOccupied) {
-                        board[row][col] = fenPiece;
+                        board[row][col] = fenPiece;           // Agree: trust FEN
                     } else if (fenPiece === '' && !sensorOccupied) {
-                        board[row][col] = '';
+                        board[row][col] = '';                  // Agree: empty
                     } else if (fenPiece === '' && sensorOccupied) {
-                        board[row][col] = '?';
+                        board[row][col] = '?';                 // Conflict: unknown piece
                         const key = row + ',' + col;
                         unknownSquares.add(key);
                         resolutionSquares.add(key);
                         hasConflicts = true;
                     } else {
-                        board[row][col] = '';
+                        board[row][col] = '';                  // FEN has piece but removed physically
                     }
                 }
             }
@@ -560,22 +552,26 @@
 
             for (let displayRow = 0; displayRow < 8; displayRow++) {
                 for (let displayCol = 0; displayCol < 8; displayCol++) {
+                    // When flipped, reverse both row and column order
                     const row = boardFlipped ? (7 - displayRow) : displayRow;
                     const col = boardFlipped ? (7 - displayCol) : displayCol;
 
                     const square = document.createElement('div');
                     const coord = String.fromCharCode(65 + col) + (8 - row);
 
+                    // Use display position for coloring (keeps board pattern consistent)
                     square.className = 'square ' + ((displayRow + displayCol) % 2 === 0 ? 'light' : 'dark');
                     square.dataset.row = row;
                     square.dataset.col = col;
                     square.dataset.coord = coord;
 
+                    // LED indicator
                     const led = document.createElement('div');
                     led.className = 'led-indicator';
                     led.dataset.coord = coord;
                     square.appendChild(led);
 
+                    // Piece
                     const piece = document.createElement('div');
                     piece.className = 'piece';
                     const pieceSymbol = board[row][col];
@@ -630,24 +626,18 @@
             }
 
             if (selectedSquare === null) {
-                // Select piece - save piece identity now
+                // Select piece - save piece identity now to protect against board changes between clicks
                 if (board[row][col] !== '') {
                     selectedSquare = { row, col, coord, piece: board[row][col] };
                     document.querySelector(`[data-coord="${coord}"]`).classList.add('selected');
                     publishMove(coord + '-L');
-                    // Local LED update: red on selected square
-                    clearAllLEDs();
-                    updateLED(coord, 'red', false);
-                    if (fadingTimer) {
-                        clearTimeout(fadingTimer);
-                        fadingTimer = null;
-                    }
                 }
             } else {
                 // Move piece
                 const fromCoord = selectedSquare.coord;
                 const toCoord = coord;
 
+                // Save last move for undo (before updating board)
                 const movingPiece = selectedSquare.piece;
                 lastMove = {
                     previousBoard: JSON.parse(JSON.stringify(board)),
@@ -660,10 +650,12 @@
                 };
                 document.getElementById('undo-btn').disabled = false;
 
+                // Check if same location (pawn-to-queen conversion only on rows 1 and 8)
                 let pieceTransformed = false;
                 if (selectedSquare.row === row && selectedSquare.col === col) {
                     const piece = movingPiece;
                     const coordKey = `${row},${col}`;
+                    // White pawn to white queen (only on row 8, which is array index 0)
                     if (piece === '♙' && row === 0) {
                         board[row][col] = '♕';
                         promotedQueens.add(coordKey);
@@ -675,6 +667,7 @@
                         pieceTransformed = true;
                         addLog('White queen demoted to pawn', 'info');
                     }
+                    // Black pawn to black queen (only on row 1, which is array index 7)
                     else if (piece === '♟' && row === 7) {
                         board[row][col] = '♛';
                         promotedQueens.add(coordKey);
@@ -687,6 +680,7 @@
                         addLog('Black queen demoted to pawn', 'info');
                     }
                 } else {
+                    // Normal move - use saved piece identity from selection time
                     board[row][col] = movingPiece;
                     board[selectedSquare.row][selectedSquare.col] = '';
                 }
@@ -695,27 +689,15 @@
                 document.querySelector(`[data-coord="${fromCoord}"]`).classList.remove('selected');
                 selectedSquare = null;
 
+                // Publish move: R for return to same position, P for place at new position or after transformation
                 if (fromCoord === toCoord && !pieceTransformed) {
-                    publishMove(toCoord + '-R');
-                    // Local LED update: clear LED (return)
-                    updateLED(toCoord, null, false);
-                    if (fadingTimer) {
-                        clearTimeout(fadingTimer);
-                        fadingTimer = null;
-                    }
+                    publishMove(toCoord + '-R');  // Return to original position
                 } else {
-                    publishMove(toCoord + '-P|' + boardToFEN());
-                    awaitingSync = true;
-                    // Local LED update: green on destination
-                    updateLED(toCoord, 'green', false);
-                    if (fadingTimer) clearTimeout(fadingTimer);
-                    fadingTimer = setTimeout(() => {
-                        clearAllLEDs();
-                        fadingTimer = null;
-                        awaitingSync = false;
-                    }, 30000);
+                    publishMove(toCoord + '-P|' + boardToFEN());  // Normal place or transformation
+                    awaitingSync = true;  // Lock until board confirms sync
                 }
 
+                // Update UI
                 updateBoardUI();
             }
         }
@@ -741,6 +723,7 @@
                     }
                 }
             }
+            // Update button state after board changes
             updateThirdButton();
         }
 
@@ -767,20 +750,9 @@
             ledStates = {};
         }
 
-        // Update color display in status bar
-        function updateColorDisplay() {
-            const text = document.getElementById('status-text');
-            if (playerColor) {
-                const colorLabel = playerColor === 'white' ? 'White' : 'Black';
-                text.textContent = isConnected ? 'Connected (' + colorLabel + ')' : 'Disconnected';
-            } else {
-                text.textContent = isConnected ? 'Connected' : 'Disconnected';
-            }
-        }
-
         // MQTT Functions
         function connectMQTT() {
-            const { broker, port, topicWhite, topicBlack, useSSL, username } = MQTT_CONFIG;
+            const { broker, port, topic, useSSL, username } = MQTT_CONFIG;
             const password = getApiKey();
 
             if (!password) {
@@ -801,26 +773,24 @@
                     if (responseObject.errorCode !== 0) {
                         addLog('Connection lost: ' + responseObject.errorMessage, 'error');
                         updateConnectionStatus(false);
+                        // Auto-reconnect after connection loss
                         setTimeout(connectMQTT, 3000);
                     }
                 };
 
                 mqttClient.onMessageArrived = (message) => {
-                    handleMQTTMessage(message.payloadString, message.destinationName);
+                    handleMQTTMessage(message.payloadString);
                 };
 
                 const connectOptions = {
                     onSuccess: () => {
                         addLog('Connected to Adafruit IO!', 'success');
                         updateConnectionStatus(true);
-                        // Subscribe to both topics
-                        ignoreRetainedWhite = true;
-                        ignoreRetainedBlack = true;
-                        mqttClient.subscribe(topicWhite);
-                        mqttClient.subscribe(topicBlack);
-                        addLog('Subscribed to ' + topicWhite + ' and ' + topicBlack, 'success');
+                        ignoreNextMessage = true;
+                        mqttClient.subscribe(topic);
+                        addLog('Subscribed to ' + topic, 'success');
 
-                        // Connection indication
+                        // Show connection indication: D4, E4 green and D5, E5 red for 1 second
                         updateLED('D4', 'green', false);
                         updateLED('E4', 'green', false);
                         updateLED('D5', 'red', false);
@@ -836,10 +806,12 @@
                     onFailure: (error) => {
                         addLog('Connection failed: ' + error.errorMessage, 'error');
                         updateConnectionStatus(false);
+                        // Clear stored key if auth failed (likely wrong key)
                         if (error.errorMessage && error.errorMessage.includes('not authorized')) {
                             localStorage.removeItem('adafruit_io_key');
                             addLog('Invalid API key cleared. Reload to try again.', 'error');
                         } else {
+                            // Auto-retry after 5 seconds for other errors
                             setTimeout(connectMQTT, 5000);
                         }
                     },
@@ -859,65 +831,27 @@
 
         function publishMove(message) {
             if (mqttClient && isConnected) {
-                // Auto color detection: first game move = white
-                if (playerColor === null && isGameMove(message)) {
-                    playerColor = 'white';
-                    myPublishTopic = MQTT_CONFIG.topicWhite;
-                    updateColorDisplay();
-                    addLog('Color determined: WHITE (first to move)', 'info');
-                }
-
-                // Use assigned topic, or default to white for pre-color control messages
-                const topic = myPublishTopic || MQTT_CONFIG.topicWhite;
-
                 try {
+                    sentMessages.add(message);
                     const mqttMessage = new Paho.MQTT.Message(message);
-                    mqttMessage.destinationName = topic;
+                    mqttMessage.destinationName = MQTT_CONFIG.topic;
                     mqttClient.send(mqttMessage);
-                    addLog('Sent to ' + topic + ': ' + message, 'sent');
+                    addLog('Sent: ' + message, 'sent');
                 } catch (error) {
                     addLog('Publish error: ' + error.message, 'error');
                 }
             }
         }
 
-        function handleMQTTMessage(message, topic) {
-            // Skip retained messages per-topic
-            if (topic === MQTT_CONFIG.topicWhite && ignoreRetainedWhite) {
-                ignoreRetainedWhite = false;
-                addLog('Skipped retained on white: ' + message, 'info');
-                return;
-            }
-            if (topic === MQTT_CONFIG.topicBlack && ignoreRetainedBlack) {
-                ignoreRetainedBlack = false;
-                addLog('Skipped retained on black: ' + message, 'info');
+        function handleMQTTMessage(message) {
+            // Skip stale retained message delivered immediately after subscribe
+            if (ignoreNextMessage) {
+                ignoreNextMessage = false;
+                addLog('Skipped retained message: ' + message, 'info');
                 return;
             }
 
-            // After color detection, ignore messages on own publish topic
-            if (playerColor === 'white' && topic === MQTT_CONFIG.topicWhite) return;
-            if (playerColor === 'black' && topic === MQTT_CONFIG.topicBlack) return;
-
-            // Auto color detection from received game moves
-            if (playerColor === null && isGameMove(message)) {
-                if (topic === MQTT_CONFIG.topicWhite) {
-                    playerColor = 'black';
-                    myPublishTopic = MQTT_CONFIG.topicBlack;
-                    updateColorDisplay();
-                    addLog('Color determined: BLACK (received white\'s move)', 'info');
-                    // Auto-flip board for black player
-                    if (!boardFlipped) {
-                        flipBoard();
-                    }
-                } else if (topic === MQTT_CONFIG.topicBlack) {
-                    playerColor = 'white';
-                    myPublishTopic = MQTT_CONFIG.topicWhite;
-                    updateColorDisplay();
-                    addLog('Color determined: WHITE (received black\'s move)', 'info');
-                }
-            }
-
-            addLog('Received on ' + topic + ': ' + message, 'received');
+            addLog('Received: ' + message, 'received');
 
             // --- Dispatch special messages ---
 
@@ -938,32 +872,32 @@
                 return;
             }
 
-            // Ignore fenfix (only relevant for ESP)
+            // Handle fenfix echo
             if (message.startsWith('fenfix:')) {
-                addLog('Ignoring fenfix (not relevant for PWA)', 'info');
+                addLog('Ignoring fenfix echo', 'info');
                 return;
             }
 
-            // Ignore sync requests (only relevant for ESP)
+            // Ignore sync echo (our own message)
             if (message === 'sync') {
-                addLog('Ignoring sync request (not relevant for PWA)', 'info');
+                addLog('Ignoring sync echo', 'info');
                 return;
             }
 
             // Handle restart message
             if (message === 'restart') {
+                const isLocalMessage = sentMessages.has(message);
+                if (isLocalMessage) {
+                    sentMessages.delete(message);
+                    return; // Don't process our own restart
+                }
+                // Reset board from external source
                 board = JSON.parse(JSON.stringify(INITIAL_BOARD));
                 selectedSquare = null;
                 externalLiftCoord = null;
                 lastMove = null;
                 promotedQueens.clear();
                 awaitingSync = false;
-                // Reset color for new game
-                playerColor = null;
-                myPublishTopic = null;
-                ignoreRetainedWhite = true;
-                ignoreRetainedBlack = true;
-                updateColorDisplay();
                 document.getElementById('undo-btn').disabled = true;
                 initBoard();
                 clearAllLEDs();
@@ -974,6 +908,12 @@
 
             // Handle undo message
             if (message === 'undo') {
+                const isLocalMessage = sentMessages.has(message);
+                if (isLocalMessage) {
+                    sentMessages.delete(message);
+                    return; // Don't process our own undo
+                }
+                // Undo last move from external source
                 if (lastMove) {
                     board = lastMove.previousBoard;
                     clearAllLEDs();
@@ -990,6 +930,7 @@
 
             if (message.length < 4) return;
 
+            // Split off FEN payload if present
             let movePart = message;
             let receivedFEN = null;
             const pipeIndex = message.indexOf('|');
@@ -1001,16 +942,30 @@
             const coord = movePart.substring(0, movePart.length - 2);
             const action = movePart.charAt(movePart.length - 1);
 
-            // All received messages are from opponent — no echo detection needed
+            // Own-echo check
+            const isLocalMessage = sentMessages.has(message);
+            if (isLocalMessage) {
+                sentMessages.delete(message);
+            }
+
+            // --- Dispatch on action ---
 
             switch (action) {
             case 'L':
-                // Opponent lift — set red LED
-                if (externalLiftCoord === null) {
-                    clearAllLEDs();
+                // Lift — set red LED, track lift coord for external (LED clearing only)
+                if (!isLocalMessage) {
+                    if (externalLiftCoord === null) {
+                        clearAllLEDs();
+                    }
+                    externalLiftCoord = coord;
+                } else {
+                    if (externalLiftCoord === null) {
+                        clearAllLEDs();
+                    }
                 }
-                externalLiftCoord = coord;
                 updateLED(coord, 'red', false);
+
+                // Clear fading timer on new lift
                 if (fadingTimer) {
                     clearTimeout(fadingTimer);
                     fadingTimer = null;
@@ -1019,20 +974,25 @@
 
             case 'P':
             case 'X':
-                // Opponent place or capture — set green LED, apply FEN
+                // Place or Capture — set green LED, apply FEN if external
                 updateLED(coord, 'green', false);
 
-                const previousBoard = JSON.parse(JSON.stringify(board));
+                if (!isLocalMessage) {
+                    const previousBoard = JSON.parse(JSON.stringify(board));
 
-                if (receivedFEN) {
-                    parseFEN(receivedFEN);
-                    addLog('External ' + (action === 'X' ? 'capture' : 'move') + ' applied via FEN', 'info');
+                    if (receivedFEN) {
+                        parseFEN(receivedFEN);
+                        addLog('External ' + (action === 'X' ? 'capture' : 'move') + ' applied via FEN', 'info');
+                    }
+
+                    // Save for undo
+                    lastMove = { previousBoard: previousBoard };
+                    document.getElementById('undo-btn').disabled = false;
+
+                    externalLiftCoord = null;
                 }
 
-                lastMove = { previousBoard: previousBoard };
-                document.getElementById('undo-btn').disabled = false;
-                externalLiftCoord = null;
-
+                // Start 30s fading timer
                 if (fadingTimer) {
                     clearTimeout(fadingTimer);
                 }
@@ -1044,9 +1004,14 @@
                 break;
 
             case 'R':
-                // Opponent return
+                // Return — piece returned to original position
                 updateLED(coord, null, false);
-                externalLiftCoord = null;
+
+                if (!isLocalMessage) {
+                    externalLiftCoord = null;
+                }
+
+                // Clear fading timer
                 if (fadingTimer) {
                     clearTimeout(fadingTimer);
                     fadingTimer = null;
@@ -1054,9 +1019,11 @@
                 break;
 
             case 'O':
-                // Sync confirmation from board
+                // Sync indication — board confirmed piece at coordinate
                 updateLED(coord, null, false);
                 delete ledStates[coord];
+
+                // Check if all colored LEDs are cleared (sync complete)
                 const hasActiveLEDs = Object.values(ledStates).some(s => s.color);
                 if (!hasActiveLEDs) {
                     awaitingSync = false;
@@ -1072,13 +1039,15 @@
         function updateConnectionStatus(connected) {
             isConnected = connected;
             const indicator = document.getElementById('status-indicator');
+            const text = document.getElementById('status-text');
 
             if (connected) {
                 indicator.classList.add('connected');
+                text.textContent = 'Connected';
             } else {
                 indicator.classList.remove('connected');
+                text.textContent = 'Disconnected';
             }
-            updateColorDisplay();
         }
 
         function addLog(message, type = 'info') {
@@ -1087,11 +1056,14 @@
 
         function resetBoard() {
             addLog('resetBoard called, syncMode=' + syncMode, 'info');
+            // Check if we're in sync resolution mode
             if (syncResolutionMode) {
                 confirmSyncResolution();
                 return;
             }
+            // Check if we're in sync mode (pieces in middle rows)
             if (syncMode) {
+                // Request sync from ESP instead of resetting
                 requestSync();
                 return;
             }
@@ -1102,18 +1074,14 @@
             lastMove = null;
             promotedQueens.clear();
             awaitingSync = false;
-            // Reset color for new game
-            playerColor = null;
-            myPublishTopic = null;
-            ignoreRetainedWhite = true;
-            ignoreRetainedBlack = true;
-            updateColorDisplay();
             document.getElementById('undo-btn').disabled = true;
             initBoard();
             clearAllLEDs();
             updateThirdButton();
             addLog('Board reset', 'info');
+            // Send restart message to MQTT
             publishMove('restart');
+            // Try to reconnect if not connected
             if (!isConnected) {
                 connectMQTT();
             }
@@ -1143,18 +1111,29 @@
         function undoMove() {
             if (!lastMove) return;
 
+            // Restore board from snapshot
             board = lastMove.previousBoard;
+
+            // Clear LEDs and unlock
             clearAllLEDs();
             awaitingSync = false;
+
+            // Update UI
             updateBoardUI();
+
+            // Disable undo button (only works for one move)
             lastMove = null;
             document.getElementById('undo-btn').disabled = true;
+
+            // Send undo message to MQTT
             publishMove('undo');
+
             addLog('Move undone', 'info');
         }
 
         function flipBoard() {
             boardFlipped = !boardFlipped;
+            // Clear selection when flipping
             if (selectedSquare) {
                 document.querySelector(`[data-coord="${selectedSquare.coord}"]`)?.classList.remove('selected');
                 selectedSquare = null;
