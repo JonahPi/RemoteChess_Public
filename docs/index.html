@@ -318,6 +318,7 @@
         let isConnected = false;
         let ledStates = {};
         let externalLiftCoord = null;
+        let externalPiece = null;     // FEN char of piece from opponent's L message
         let fadingTimer = null;
         let lastMove = null;
         let boardFlipped = false;
@@ -634,7 +635,7 @@
                 if (board[row][col] !== '') {
                     selectedSquare = { row, col, coord, piece: board[row][col] };
                     document.querySelector(`[data-coord="${coord}"]`).classList.add('selected');
-                    publishMove(coord + '-L');
+                    publishMove(coord + '-L|' + PIECE_TO_FEN[selectedSquare.piece]);
                     // Local LED update: red on selected square
                     clearAllLEDs();
                     updateLED(coord, 'red', false);
@@ -696,7 +697,7 @@
                 selectedSquare = null;
 
                 if (fromCoord === toCoord && !pieceTransformed) {
-                    publishMove(toCoord + '-R');
+                    publishMove(toCoord + '-R|' + PIECE_TO_FEN[movingPiece]);
                     // Local LED update: clear LED (return)
                     updateLED(toCoord, null, false);
                     if (fadingTimer) {
@@ -704,7 +705,7 @@
                         fadingTimer = null;
                     }
                 } else {
-                    publishMove(toCoord + '-P|' + boardToFEN());
+                    publishMove(toCoord + '-P|' + PIECE_TO_FEN[board[row][col]] + '|' + boardToFEN());
                     awaitingSync = true;
                     // Local LED update: green on destination
                     updateLED(toCoord, 'green', false);
@@ -713,7 +714,7 @@
                         clearAllLEDs();
                         fadingTimer = null;
                         awaitingSync = false;
-                    }, 10000);
+                    }, 15000);
                 }
 
                 updateBoardUI();
@@ -955,6 +956,7 @@
                 board = JSON.parse(JSON.stringify(INITIAL_BOARD));
                 selectedSquare = null;
                 externalLiftCoord = null;
+                externalPiece = null;
                 lastMove = null;
                 promotedQueens.clear();
                 awaitingSync = false;
@@ -990,13 +992,11 @@
 
             if (message.length < 4) return;
 
-            let movePart = message;
-            let receivedFEN = null;
-            const pipeIndex = message.indexOf('|');
-            if (pipeIndex !== -1) {
-                movePart = message.substring(0, pipeIndex);
-                receivedFEN = message.substring(pipeIndex + 1);
-            }
+            // Format: movePart | piecePayload | receivedFEN  (piece and FEN optional)
+            const parts = message.split('|');
+            const movePart = parts[0];
+            const piecePayload = parts.length >= 2 ? parts[1] : null;   // FEN char, e.g. 'P', 'p'
+            const receivedFEN = parts.length >= 3 ? parts[2] : null;
 
             const coord = movePart.substring(0, movePart.length - 2);
             const action = movePart.charAt(movePart.length - 1);
@@ -1005,11 +1005,12 @@
 
             switch (action) {
             case 'L':
-                // Opponent lift — set red LED
+                // Opponent lift — store piece identity, set red LED
                 if (externalLiftCoord === null) {
                     clearAllLEDs();
                 }
                 externalLiftCoord = coord;
+                externalPiece = piecePayload;   // FEN char of lifted piece
                 updateLED(coord, 'red', false);
                 if (fadingTimer) {
                     clearTimeout(fadingTimer);
@@ -1017,43 +1018,101 @@
                 }
                 break;
 
-            case 'P':
-            case 'X':
-                // Opponent place or capture — set green LED, apply FEN
-                updateLED(coord, 'green', false);
-
+            case 'P': {
+                // Opponent place — apply move directly using piece identity, then verify FEN
                 const previousBoard = JSON.parse(JSON.stringify(board));
 
-                if (receivedFEN) {
-                    parseFEN(receivedFEN);
-                    addLog('External ' + (action === 'X' ? 'capture' : 'move') + ' applied via FEN', 'info');
+                const pieceUnicode = piecePayload ? FEN_TO_PIECE[piecePayload] : null;
+                if (pieceUnicode && externalLiftCoord) {
+                    // Clear source square, set piece at destination
+                    const srcRow = 8 - parseInt(externalLiftCoord.substring(1));
+                    const srcCol = externalLiftCoord.charCodeAt(0) - 65;
+                    const destRow = 8 - parseInt(coord.substring(1));
+                    const destCol = coord.charCodeAt(0) - 65;
+                    board[srcRow][srcCol] = '';
+                    board[destRow][destCol] = pieceUnicode;
                 }
 
-                lastMove = { previousBoard: previousBoard };
+                // FEN verify: if local state drifted, trust the sender's FEN
+                if (receivedFEN) {
+                    const localFEN = boardToFEN();
+                    if (localFEN !== receivedFEN) {
+                        addLog('FEN mismatch — force syncing: local=' + localFEN, 'error');
+                        parseFEN(receivedFEN);
+                    }
+                }
+
+                lastMove = { previousBoard };
                 document.getElementById('undo-btn').disabled = false;
                 externalLiftCoord = null;
+                externalPiece = null;
 
-                if (fadingTimer) {
-                    clearTimeout(fadingTimer);
-                }
+                updateLED(coord, 'green', false);
+                updateBoardUI();
+                if (fadingTimer) clearTimeout(fadingTimer);
                 fadingTimer = setTimeout(() => {
                     clearAllLEDs();
                     fadingTimer = null;
                     awaitingSync = false;
-                }, 10000);
+                }, 15000);
                 break;
+            }
 
-            case 'R':
-                // Opponent return
-                updateLED(coord, null, false);
+            case 'X': {
+                // Opponent capture — trust FEN for the full board state (two-lift complexity)
+                const previousBoard = JSON.parse(JSON.stringify(board));
+
+                if (receivedFEN) {
+                    parseFEN(receivedFEN);
+                    addLog('Capture applied via FEN', 'info');
+                } else if (piecePayload) {
+                    // Fallback: at least place the surviving piece at dest
+                    const pieceUnicode = FEN_TO_PIECE[piecePayload];
+                    if (pieceUnicode) {
+                        const destRow = 8 - parseInt(coord.substring(1));
+                        const destCol = coord.charCodeAt(0) - 65;
+                        board[destRow][destCol] = pieceUnicode;
+                        updateBoardUI();
+                    }
+                }
+
+                lastMove = { previousBoard };
+                document.getElementById('undo-btn').disabled = false;
                 externalLiftCoord = null;
+                externalPiece = null;
+
+                updateLED(coord, 'green', false);
+                if (fadingTimer) clearTimeout(fadingTimer);
+                fadingTimer = setTimeout(() => {
+                    clearAllLEDs();
+                    fadingTimer = null;
+                    awaitingSync = false;
+                }, 15000);
+                break;
+            }
+
+            case 'R': {
+                // Opponent return — restore piece at coord using received piece identity
+                if (piecePayload) {
+                    const pieceUnicode = FEN_TO_PIECE[piecePayload];
+                    if (pieceUnicode) {
+                        const row = 8 - parseInt(coord.substring(1));
+                        const col = coord.charCodeAt(0) - 65;
+                        board[row][col] = pieceUnicode;
+                        updateBoardUI();
+                    }
+                }
+                externalLiftCoord = null;
+                externalPiece = null;
+                updateLED(coord, null, false);
                 if (fadingTimer) {
                     clearTimeout(fadingTimer);
                     fadingTimer = null;
                 }
                 break;
+            }
 
-            case 'O':
+            case 'O': {
                 // Sync confirmation from board
                 updateLED(coord, null, false);
                 delete ledStates[coord];
@@ -1066,6 +1125,7 @@
                     }
                 }
                 break;
+            }
             }
         }
 
@@ -1099,6 +1159,7 @@
             board = JSON.parse(JSON.stringify(INITIAL_BOARD));
             selectedSquare = null;
             externalLiftCoord = null;
+            externalPiece = null;
             lastMove = null;
             promotedQueens.clear();
             awaitingSync = false;
