@@ -317,8 +317,9 @@
         let mqttClient = null;
         let isConnected = false;
         let ledStates = {};
-        let externalLiftCoord = null;
-        let externalPiece = null;     // FEN char of piece from opponent's L message
+        let externalFirstLiftCoord = null; // coord of first L in a move sequence (attacker source)
+        let externalLiftCoord = null;      // coord of most recent L (overwritten on second lift)
+        let externalPiece = null;          // FEN char of piece from opponent's L message
         let fadingTimer = null;
         let lastMove = null;
         let boardFlipped = false;
@@ -955,6 +956,7 @@
             if (message === 'restart') {
                 board = JSON.parse(JSON.stringify(INITIAL_BOARD));
                 selectedSquare = null;
+                externalFirstLiftCoord = null;
                 externalLiftCoord = null;
                 externalPiece = null;
                 lastMove = null;
@@ -1005,12 +1007,15 @@
 
             switch (action) {
             case 'L':
-                // Opponent lift — store piece identity, set red LED
-                if (externalLiftCoord === null) {
+                // Opponent lift — store piece identity, set red LED.
+                // Treat as first lift if: no prior L, OR prior L had no follow-up P/R/X
+                // (detected when first == last, meaning only one L was pending).
+                if (externalLiftCoord === null || externalFirstLiftCoord === externalLiftCoord) {
                     clearAllLEDs();
+                    externalFirstLiftCoord = coord;  // first lift = attacker's source
                 }
                 externalLiftCoord = coord;
-                externalPiece = piecePayload;   // FEN char of lifted piece
+                externalPiece = piecePayload;   // FEN char of lifted piece (may be empty on board drift)
                 updateLED(coord, 'red', false);
                 if (fadingTimer) {
                     clearTimeout(fadingTimer);
@@ -1019,31 +1024,40 @@
                 break;
 
             case 'P': {
-                // Opponent place — apply move directly using piece identity, then verify FEN
+                // Opponent place — apply move directly using piece identity from message.
+                // FEN is used for mismatch detection only — never overwrite the whole board
+                // here, as that would corrupt unrelated squares due to ESP board drift.
                 const previousBoard = JSON.parse(JSON.stringify(board));
 
-                const pieceUnicode = piecePayload ? FEN_TO_PIECE[piecePayload] : null;
-                if (pieceUnicode && externalLiftCoord) {
-                    // Clear source square, set piece at destination
-                    const srcRow = 8 - parseInt(externalLiftCoord.substring(1));
-                    const srcCol = externalLiftCoord.charCodeAt(0) - 65;
+                let pieceUnicode = piecePayload ? FEN_TO_PIECE[piecePayload] : null;
+                const src = externalFirstLiftCoord || externalLiftCoord;
+                // Fallback: ESP board drift sent empty piece — use what PWA shows at source
+                if (!pieceUnicode && src) {
+                    const fRow = 8 - parseInt(src.substring(1));
+                    const fCol = src.charCodeAt(0) - 65;
+                    pieceUnicode = board[fRow][fCol] || null;
+                    if (pieceUnicode) addLog('P: empty piece from ESP, using local board at ' + src + ': ' + pieceUnicode, 'warning');
+                }
+                if (pieceUnicode && src) {
+                    const srcRow = 8 - parseInt(src.substring(1));
+                    const srcCol = src.charCodeAt(0) - 65;
                     const destRow = 8 - parseInt(coord.substring(1));
                     const destCol = coord.charCodeAt(0) - 65;
                     board[srcRow][srcCol] = '';
                     board[destRow][destCol] = pieceUnicode;
                 }
 
-                // FEN verify: if local state drifted, trust the sender's FEN
+                // Log FEN mismatches for diagnostics — use Sync button to reconcile
                 if (receivedFEN) {
                     const localFEN = boardToFEN();
                     if (localFEN !== receivedFEN) {
-                        addLog('FEN mismatch — force syncing: local=' + localFEN, 'error');
-                        parseFEN(receivedFEN);
+                        addLog('FEN mismatch (logged, not applied): local=' + localFEN + ' remote=' + receivedFEN, 'error');
                     }
                 }
 
                 lastMove = { previousBoard };
                 document.getElementById('undo-btn').disabled = false;
+                externalFirstLiftCoord = null;
                 externalLiftCoord = null;
                 externalPiece = null;
 
@@ -1059,29 +1073,56 @@
             }
 
             case 'X': {
-                // Opponent capture — trust FEN for the full board state (two-lift complexity)
+                // Opponent capture — apply directly using piece identity.
+                // externalFirstLiftCoord = attacker source (first L)
+                // externalLiftCoord      = captured piece square (second L, already vacated)
+                // coord                  = attacker destination
                 const previousBoard = JSON.parse(JSON.stringify(board));
 
+                let pieceUnicode = piecePayload ? FEN_TO_PIECE[piecePayload] : null;
+                // Fallback: ESP board drift sent empty piece — use what PWA shows at attacker's source
+                if (!pieceUnicode && externalFirstLiftCoord) {
+                    const fRow = 8 - parseInt(externalFirstLiftCoord.substring(1));
+                    const fCol = externalFirstLiftCoord.charCodeAt(0) - 65;
+                    pieceUnicode = board[fRow][fCol] || null;
+                    if (pieceUnicode) addLog('X: empty piece from ESP, using local board at ' + externalFirstLiftCoord + ': ' + pieceUnicode, 'warning');
+                }
+                // Always clear the involved squares (even if piece identity unknown — prevents ghost pieces)
+                if (externalFirstLiftCoord) {
+                    const r = 8 - parseInt(externalFirstLiftCoord.substring(1));
+                    const c = externalFirstLiftCoord.charCodeAt(0) - 65;
+                    board[r][c] = '';
+                }
+                if (externalLiftCoord && externalLiftCoord !== externalFirstLiftCoord) {
+                    const r = 8 - parseInt(externalLiftCoord.substring(1));
+                    const c = externalLiftCoord.charCodeAt(0) - 65;
+                    board[r][c] = '';
+                }
+                if (pieceUnicode) {
+                    // Place attacker at destination
+                    const destRow = 8 - parseInt(coord.substring(1));
+                    const destCol = coord.charCodeAt(0) - 65;
+                    board[destRow][destCol] = pieceUnicode;
+                } else {
+                    addLog('X: unknown piece identity, squares cleared but destination not filled — use Sync', 'warning');
+                }
+
+                // Log FEN mismatches for diagnostics — use Sync button to reconcile
                 if (receivedFEN) {
-                    parseFEN(receivedFEN);
-                    addLog('Capture applied via FEN', 'info');
-                } else if (piecePayload) {
-                    // Fallback: at least place the surviving piece at dest
-                    const pieceUnicode = FEN_TO_PIECE[piecePayload];
-                    if (pieceUnicode) {
-                        const destRow = 8 - parseInt(coord.substring(1));
-                        const destCol = coord.charCodeAt(0) - 65;
-                        board[destRow][destCol] = pieceUnicode;
-                        updateBoardUI();
+                    const localFEN = boardToFEN();
+                    if (localFEN !== receivedFEN) {
+                        addLog('FEN mismatch capture (logged, not applied): local=' + localFEN + ' remote=' + receivedFEN, 'error');
                     }
                 }
 
                 lastMove = { previousBoard };
                 document.getElementById('undo-btn').disabled = false;
+                externalFirstLiftCoord = null;
                 externalLiftCoord = null;
                 externalPiece = null;
 
                 updateLED(coord, 'green', false);
+                updateBoardUI();
                 if (fadingTimer) clearTimeout(fadingTimer);
                 fadingTimer = setTimeout(() => {
                     clearAllLEDs();
@@ -1102,6 +1143,7 @@
                         updateBoardUI();
                     }
                 }
+                externalFirstLiftCoord = null;
                 externalLiftCoord = null;
                 externalPiece = null;
                 updateLED(coord, null, false);
@@ -1158,6 +1200,7 @@
 
             board = JSON.parse(JSON.stringify(INITIAL_BOARD));
             selectedSquare = null;
+            externalFirstLiftCoord = null;
             externalLiftCoord = null;
             externalPiece = null;
             lastMove = null;
