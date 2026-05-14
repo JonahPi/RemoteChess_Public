@@ -322,7 +322,7 @@
         let externalPiece = null;          // FEN char of piece from opponent's L message
         let fadingTimer = null;
         let lastMove = null;
-        let boardFlipped = false;
+        let boardFlipped = true;
         let promotedQueens = new Set();
         let awaitingSync = false;
         let syncMode = false;
@@ -330,11 +330,11 @@
         let unknownSquares = new Set();
         let resolutionSquares = new Set();
 
-        // Two-stream color detection
-        let playerColor = null;       // null, 'white', or 'black'
-        let myPublishTopic = null;    // Set after color determination
+        // PWA plays as black — fixed, no auto-detection
+        const playerColor = 'black';
+        const myPublishTopic = MQTT_CONFIG.topicBlack;
         let ignoreRetainedWhite = false;
-        let ignoreRetainedBlack = false;
+        let setupPhase = true;        // true until white's setup_ok is received
 
         // FEN piece to Unicode mapping
         const FEN_TO_PIECE = {
@@ -349,13 +349,6 @@
         };
 
         const PIECE_CYCLE = ['?','♙','♘','♗','♖','♕','♔','♟','♞','♝','♜','♛','♚'];
-
-        // Check if message is a game move (triggers color assignment)
-        function isGameMove(message) {
-            if (message === 'sync' || message === 'restart' || message === 'undo') return false;
-            if (message.startsWith('fenfix:') || message.startsWith('fen:')) return false;
-            return true;
-        }
 
         // Check if any piece is in middle rows (3-6, array indices 2-5)
         function hasPiecesInMiddle() {
@@ -621,6 +614,11 @@
                 return;
             }
 
+            if (setupPhase) {
+                addLog('Setup phase — waiting for white board', 'info');
+                return;
+            }
+
             if (!isConnected) {
                 addLog('Not connected to MQTT', 'error');
                 return;
@@ -772,11 +770,12 @@
         // Update color display in status bar
         function updateColorDisplay() {
             const text = document.getElementById('status-text');
-            if (playerColor) {
-                const colorLabel = playerColor === 'white' ? 'White' : 'Black';
-                text.textContent = isConnected ? 'Connected (' + colorLabel + ')' : 'Disconnected';
+            if (!isConnected) {
+                text.textContent = 'Disconnected';
+            } else if (setupPhase) {
+                text.textContent = 'Waiting for White...';
             } else {
-                text.textContent = isConnected ? 'Connected' : 'Disconnected';
+                text.textContent = 'Connected (Black)';
             }
         }
 
@@ -815,12 +814,10 @@
                     onSuccess: () => {
                         addLog('Connected to Adafruit IO!', 'success');
                         updateConnectionStatus(true);
-                        // Subscribe to both topics
+                        // Subscribe to opponent's topic only
                         ignoreRetainedWhite = true;
-                        ignoreRetainedBlack = true;
                         mqttClient.subscribe(topicWhite);
-                        mqttClient.subscribe(topicBlack);
-                        addLog('Subscribed to ' + topicWhite + ' and ' + topicBlack, 'success');
+                        addLog('Subscribed to ' + topicWhite, 'success');
 
                         // Connection indication
                         updateLED('D4', 'green', false);
@@ -832,7 +829,6 @@
                             updateLED('E4', null, false);
                             updateLED('D5', null, false);
                             updateLED('E5', null, false);
-                            requestSync();
                         }, 1000);
                     },
                     onFailure: (error) => {
@@ -861,22 +857,11 @@
 
         function publishMove(message) {
             if (mqttClient && isConnected) {
-                // Auto color detection: first game move = white
-                if (playerColor === null && isGameMove(message)) {
-                    playerColor = 'white';
-                    myPublishTopic = MQTT_CONFIG.topicWhite;
-                    updateColorDisplay();
-                    addLog('Color determined: WHITE (first to move)', 'info');
-                }
-
-                // Use assigned topic, or default to white for pre-color control messages
-                const topic = myPublishTopic || MQTT_CONFIG.topicWhite;
-
                 try {
                     const mqttMessage = new Paho.MQTT.Message(message);
-                    mqttMessage.destinationName = topic;
+                    mqttMessage.destinationName = myPublishTopic;
                     mqttClient.send(mqttMessage);
-                    addLog('Sent to ' + topic + ': ' + message, 'sent');
+                    addLog('Sent to ' + myPublishTopic + ': ' + message, 'sent');
                 } catch (error) {
                     addLog('Publish error: ' + error.message, 'error');
                 }
@@ -884,39 +869,11 @@
         }
 
         function handleMQTTMessage(message, topic) {
-            // Skip retained messages per-topic
+            // Skip the first retained message on white topic after (re)connect
             if (topic === MQTT_CONFIG.topicWhite && ignoreRetainedWhite) {
                 ignoreRetainedWhite = false;
                 addLog('Skipped retained on white: ' + message, 'info');
                 return;
-            }
-            if (topic === MQTT_CONFIG.topicBlack && ignoreRetainedBlack) {
-                ignoreRetainedBlack = false;
-                addLog('Skipped retained on black: ' + message, 'info');
-                return;
-            }
-
-            // After color detection, ignore messages on own publish topic
-            if (playerColor === 'white' && topic === MQTT_CONFIG.topicWhite) return;
-            if (playerColor === 'black' && topic === MQTT_CONFIG.topicBlack) return;
-
-            // Auto color detection from received game moves
-            if (playerColor === null && isGameMove(message)) {
-                if (topic === MQTT_CONFIG.topicWhite) {
-                    playerColor = 'black';
-                    myPublishTopic = MQTT_CONFIG.topicBlack;
-                    updateColorDisplay();
-                    addLog('Color determined: BLACK (received white\'s move)', 'info');
-                    // Auto-flip board for black player
-                    if (!boardFlipped) {
-                        flipBoard();
-                    }
-                } else if (topic === MQTT_CONFIG.topicBlack) {
-                    playerColor = 'white';
-                    myPublishTopic = MQTT_CONFIG.topicWhite;
-                    updateColorDisplay();
-                    addLog('Color determined: WHITE (received black\'s move)', 'info');
-                }
             }
 
             addLog('Received on ' + topic + ': ' + message, 'received');
@@ -952,7 +909,18 @@
                 return;
             }
 
-            // Handle restart message
+            // White board confirmed setup — acknowledge and start game
+            if (message === 'setup_ok') {
+                if (setupPhase) {
+                    publishMove('setup_ok');
+                    setupPhase = false;
+                    updateColorDisplay();
+                    addLog('White setup confirmed — game starting', 'success');
+                }
+                return;
+            }
+
+            // Handle restart message — white board powered on, re-enter setup phase
             if (message === 'restart') {
                 board = JSON.parse(JSON.stringify(INITIAL_BOARD));
                 selectedSquare = null;
@@ -962,17 +930,13 @@
                 lastMove = null;
                 promotedQueens.clear();
                 awaitingSync = false;
-                // Reset color for new game
-                playerColor = null;
-                myPublishTopic = null;
-                ignoreRetainedWhite = true;
-                ignoreRetainedBlack = true;
+                setupPhase = true;
                 updateColorDisplay();
                 document.getElementById('undo-btn').disabled = true;
                 initBoard();
                 clearAllLEDs();
                 updateThirdButton();
-                addLog('External restart received', 'info');
+                addLog('External restart received — waiting for setup_ok', 'info');
                 return;
             }
 
@@ -1206,11 +1170,7 @@
             lastMove = null;
             promotedQueens.clear();
             awaitingSync = false;
-            // Reset color for new game
-            playerColor = null;
-            myPublishTopic = null;
-            ignoreRetainedWhite = true;
-            ignoreRetainedBlack = true;
+            setupPhase = true;
             updateColorDisplay();
             document.getElementById('undo-btn').disabled = true;
             initBoard();
