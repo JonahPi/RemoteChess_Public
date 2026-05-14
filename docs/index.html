@@ -971,12 +971,11 @@
 
             switch (action) {
             case 'L':
-                // Opponent lift — store piece identity, set red LED.
-                // Treat as first lift if: no prior L, OR prior L had no follow-up P/R/X
-                // (detected when first == last, meaning only one L was pending).
-                if (externalLiftCoord === null || externalFirstLiftCoord === externalLiftCoord) {
+                // First L of a new sequence: no prior L pending.
+                // Second L (capture): externalFirstLiftCoord already set — preserve it as attacker source.
+                if (externalFirstLiftCoord === null) {
                     clearAllLEDs();
-                    externalFirstLiftCoord = coord;  // first lift = attacker's source
+                    externalFirstLiftCoord = coord;
                 }
                 externalLiftCoord = coord;
                 externalPiece = piecePayload;   // FEN char of lifted piece (may be empty on board drift)
