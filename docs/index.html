@@ -1027,6 +1027,7 @@
 
                 updateLED(coord, 'green', false);
                 updateBoardUI();
+                publishMove('synced');
                 if (fadingTimer) clearTimeout(fadingTimer);
                 fadingTimer = setTimeout(() => {
                     clearAllLEDs();
@@ -1087,6 +1088,7 @@
 
                 updateLED(coord, 'green', false);
                 updateBoardUI();
+                publishMove('synced');
                 if (fadingTimer) clearTimeout(fadingTimer);
                 fadingTimer = setTimeout(() => {
                     clearAllLEDs();
